@@ -1,0 +1,67 @@
+# ---- OS / editor ----
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# ---- Secrets / local config ----
+.env
+.env.local
+.env.*.local
+**/k8s/secret.yaml
+.claude/settings.local.json
+.github/modernize/
+backend/.github/modernize/
+
+# ---- Java / Maven (backend) ----
+backend/target/
+target/
+*.class
+*.jar
+*.war
+*.ear
+!**/.mvn/wrapper/maven-wrapper.jar
+.mvn/timing.properties
+
+# ---- Node / Next.js (admin-dashboard) ----
+node_modules/
+.next/
+out/
+build/
+dist/
+*.tsbuildinfo
+next-env.d.ts
+.npm/
+.eslintcache
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# ---- Python (embedding-service, loadtest) ----
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+
+# ---- Vendored / downloaded tooling ----
+istio-1.22.0/
+istio-*/
+
+# ---- Logs / temp / generated ----
+*.log
+logs/
+*.tmp
+*.bak
+coverage/
+.coverage
+htmlcov/

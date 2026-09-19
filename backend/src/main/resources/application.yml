@@ -1,0 +1,142 @@
+spring:
+  application:
+    name: intuitive-search
+
+  # The pipeline chains several blocking I/O calls per request (embedding
+  # service -> Postgres -> LLM -> Postgres). Virtual threads let that scale
+  # on plain blocking code instead of reactive plumbing.
+  threads:
+    virtual:
+      enabled: true
+
+  datasource:
+    url: ${DATABASE_URL:jdbc:postgresql://localhost:5432/banksearch}
+    username: ${DATABASE_USER:bank}
+    password: ${DATABASE_PASSWORD:bank}
+    hikari:
+      maximum-pool-size: 5
+      connection-timeout: 2000
+      pool-name: search-pool
+
+  jackson:
+    property-naming-strategy: SNAKE_CASE
+    default-property-inclusion: non_null
+
+server:
+  port: ${SERVER_PORT:8080}
+  shutdown: graceful
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+  endpoint:
+    health:
+      show-details: when-authorized
+
+logging:
+  level:
+    com.bank.intuitivesearch: INFO
+
+search:
+  # ---- Stage 1: hybrid retrieval -----------------------------------
+  candidate-limit: 10
+  # Relative weights for the retrieval channels. If a channel is unavailable
+  # (e.g. the embedding service is down) its weight is dropped and the
+  # remaining ones are renormalised, so confidence stays comparable.
+  #   keyword     - Postgres full-text rank
+  #   trigram     - pg_trgm fuzzy / abbreviation similarity
+  #   vector      - pgvector cosine similarity
+  #   containment - the query literally contains one of the feature's naming
+  #                 terms. Carries the most weight of the lexical channels
+  #                 because it is the only one that stays reliable when a
+  #                 command query is padded with parameter text.
+  weights:
+    keyword: 0.20
+    trigram: 0.15
+    vector: 0.35
+    containment: 0.30
+  # Below this, we return suggestions instead of committing to a feature.
+  navigate-threshold: 0.35
+  # Stage 2 is gated on a positive signal score AND feature certainty.
+  # Certainty is satisfied by either a high absolute score, or a clear margin
+  # over the runner-up — parameter text dilutes every similarity channel, so
+  # absolute score alone would gate out exactly the queries Stage 2 exists for.
+  extraction-threshold: 0.62
+  extraction-margin: 0.15
+  # An exact hit on a display name or alias ("trf") is not ambiguous.
+  exact-match-confidence: 0.97
+
+  # ---- Signal detection (generic, feature-agnostic) ----------------
+  signal:
+    # Fire Stage 2 when the weighted signal score reaches this.
+    threshold: 2
+    weight-number: 2
+    weight-currency: 1
+    # A concrete date word is as strong an indicator of extractable content as
+    # a number ("...for march" names a statement period outright).
+    weight-date: 2
+    weight-extra-token: 1
+    # A residue token is only weak evidence when the feature's slots all want a
+    # number, a date or a currency — those score on their own. When a slot can
+    # hold a bare word (a payee, an account nickname, a biller), that word is
+    # the whole parameter, and word count is not a measure of intent.
+    weight-extra-token-free-text: 2
+    max-extra-token-score: 2
+    currency-codes: >-
+      usd,eur,gbp,jpy,sgd,aud,cad,chf,cny,hkd,idr,myr,thb,php,vnd,inr,krw,nzd,sek,aed,sar
+    currency-symbols: "$,€,£,¥,₹,₩,₫,฿,₱,rp,rm,s$,a$,hk$"
+    date-words: >-
+      today,tomorrow,yesterday,tonight,now,later,week,weekly,month,monthly,year,yearly,
+      daily,quarter,annual,january,february,march,april,may,june,july,august,september,
+      october,november,december,jan,feb,mar,apr,jun,jul,aug,sep,sept,oct,nov,dec,monday,
+      tuesday,wednesday,thursday,friday,saturday,sunday,mon,tue,wed,thu,fri,sat,sun,
+      last,next,previous,past,upcoming,since,until,between,from,before,after
+    stop-words: >-
+      a,an,the,to,for,of,and,or,my,me,mine,i,is,are,am,do,does,please,want,need,would,
+      like,can,could,should,let,us,get,go,show,open,with,on,at,in,it,this,that,there,
+      here,new,some,any,all,s,pls,plz
+
+  # ---- Stage 2: LLM slot extraction --------------------------------
+  llm:
+    # heuristic | ollama | anthropic
+    # `heuristic` needs no model at all and keeps the pipeline runnable in
+    # dev/CI. Switch to `ollama` for on-prem, `anthropic` for hosted.
+    provider: ${LLM_PROVIDER:heuristic}
+    timeout-ms: 2500
+    max-output-tokens: 512
+    ollama:
+      base-url: ${OLLAMA_BASE_URL:http://localhost:11434}
+      model: ${OLLAMA_MODEL:qwen2.5:3b-instruct}
+    anthropic:
+      # The spec names Haiku for this stage: small, fast, strict JSON.
+      model: ${ANTHROPIC_MODEL:claude-haiku-4-5}
+      # API key resolves from ANTHROPIC_API_KEY or an `ant auth login` profile.
+
+  # ---- Embedding service -------------------------------------------
+  embedding:
+    enabled: ${EMBEDDING_ENABLED:true}
+    base-url: ${EMBEDDING_BASE_URL:http://localhost:8000}
+    # End-to-end deadline for the whole operation, including time queued
+    # waiting for an HTTP connection. A plain read timeout does not cover
+    # that, and under load that is where the time actually goes.
+    timeout-ms: 400
+    dimensions: 384
+    # Bulkhead. The model serves ~55 req/s on 8 CPU cores, so admitting more
+    # than a handful of concurrent calls just builds a queue nobody can pay
+    # for. Past this, the vector channel is skipped immediately.
+    max-concurrent: 16
+    # Circuit breaker: stop paying the deadline on every request once the
+    # service is clearly unhealthy.
+    circuit-breaker-failures: 5
+    circuit-open-ms: 5000
+
+  # ---- Stage 3: entity resolution ----------------------------------
+  resolution:
+    # pg_trgm similarity floor for accepting a fuzzy name match.
+    min-similarity: 0.30
+    # Below this gap between best and runner-up, we return both and let the
+    # user pick on the pre-filled form.
+    ambiguity-margin: 0.12
+    max-candidates: 5

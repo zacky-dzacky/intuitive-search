@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: intuitive-search-config
+  namespace: default
+data:
+  LLM_PROVIDER: "heuristic"
+  EMBEDDING_ENABLED: "true"
+  EMBEDDING_BASE_URL: "http://embedding-service-svc:8000"
+  # OLLAMA_BASE_URL: "http://ollama-svc:11434"
+  # ANTHROPIC_MODEL: "claude-haiku-4-5"
+  # Overrides logging.level.com.bank.intuitivesearch in application.yml, which
+  # defaults to INFO and so hides the per-query DEBUG line in SearchOrchestrator.
+  LOGGING_LEVEL_COM_BANK_INTUITIVESEARCH: "DEBUG"

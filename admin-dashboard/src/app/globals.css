@@ -1,0 +1,166 @@
+@import "tailwindcss";
+
+/*
+ * One palette, defined once as semantic roles rather than colour names, so a
+ * component never has to know whether it is being rendered light or dark.
+ */
+:root {
+  --canvas: oklch(98.4% 0.003 250);
+  --surface: oklch(100% 0 0);
+  --surface-muted: oklch(96.8% 0.005 250);
+  --border: oklch(91% 0.007 250);
+  --border-strong: oklch(84% 0.011 250);
+  --text: oklch(24% 0.02 255);
+  --text-muted: oklch(52% 0.017 255);
+  --text-faint: oklch(64% 0.014 255);
+  --accent: oklch(52% 0.19 265);
+  --accent-hover: oklch(46% 0.19 265);
+  --accent-soft: oklch(95.5% 0.025 265);
+  --accent-text: oklch(100% 0 0);
+  --ok: oklch(56% 0.14 155);
+  --ok-soft: oklch(95.5% 0.04 155);
+  --warn: oklch(63% 0.15 75);
+  --warn-soft: oklch(96% 0.05 85);
+  --danger: oklch(56% 0.19 27);
+  --danger-soft: oklch(96% 0.04 27);
+  --shadow: 0 1px 2px oklch(24% 0.02 255 / 0.06), 0 4px 12px oklch(24% 0.02 255 / 0.05);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --canvas: oklch(19% 0.014 258);
+    --surface: oklch(23% 0.016 258);
+    --surface-muted: oklch(26.5% 0.017 258);
+    --border: oklch(31% 0.018 258);
+    --border-strong: oklch(39% 0.02 258);
+    --text: oklch(95% 0.006 258);
+    --text-muted: oklch(74% 0.014 258);
+    --text-faint: oklch(62% 0.015 258);
+    --accent: oklch(70% 0.15 265);
+    --accent-hover: oklch(76% 0.15 265);
+    --accent-soft: oklch(31% 0.06 265);
+    --accent-text: oklch(17% 0.02 265);
+    --ok: oklch(74% 0.14 155);
+    --ok-soft: oklch(30% 0.05 155);
+    --warn: oklch(80% 0.14 80);
+    --warn-soft: oklch(32% 0.05 80);
+    --danger: oklch(70% 0.16 25);
+    --danger-soft: oklch(31% 0.06 25);
+    --shadow: 0 1px 2px oklch(0% 0 0 / 0.3), 0 4px 14px oklch(0% 0 0 / 0.25);
+  }
+}
+
+@theme inline {
+  --color-canvas: var(--canvas);
+  --color-surface: var(--surface);
+  --color-surface-muted: var(--surface-muted);
+  --color-border: var(--border);
+  --color-border-strong: var(--border-strong);
+  --color-text: var(--text);
+  --color-text-muted: var(--text-muted);
+  --color-text-faint: var(--text-faint);
+  --color-accent: var(--accent);
+  --color-accent-hover: var(--accent-hover);
+  --color-accent-soft: var(--accent-soft);
+  --color-accent-text: var(--accent-text);
+  --color-ok: var(--ok);
+  --color-ok-soft: var(--ok-soft);
+  --color-warn: var(--warn);
+  --color-warn-soft: var(--warn-soft);
+  --color-danger: var(--danger);
+  --color-danger-soft: var(--danger-soft);
+
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+}
+
+/*
+ * Chart colours, scoped to `.viz`.
+ *
+ * Categorical slots are assigned in fixed order and never cycled — a series
+ * keeps its hue when the set is filtered. Validated against this dashboard's
+ * own surfaces (#ffffff light, #181d25 dark) rather than assumed: light mode
+ * puts aqua and yellow below 3:1, which is why every mark in this file is
+ * directly labelled.
+ */
+.viz {
+  --series-1: #2a78d6; /* blue */
+  --series-2: #eb6834; /* orange */
+  --series-3: #1baf7a; /* aqua */
+  --series-4: #eda100; /* yellow */
+  --viz-grid: var(--border);
+  --viz-axis: var(--border-strong);
+}
+
+@media (prefers-color-scheme: dark) {
+  .viz {
+    --series-1: #3987e5;
+    --series-2: #d95926;
+    --series-3: #199e70;
+    --series-4: #c98500;
+  }
+}
+
+html {
+  color-scheme: light dark;
+}
+
+body {
+  background: var(--canvas);
+  color: var(--text);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Inputs inherit the palette rather than each restating it. */
+.field {
+  width: 100%;
+  border-radius: 0.5rem;
+  border: 1px solid var(--border-strong);
+  background: var(--surface);
+  color: var(--text);
+  padding: 0.5rem 0.7rem;
+  font-size: 0.875rem;
+  line-height: 1.35rem;
+  transition: border-color 120ms ease, box-shadow 120ms ease;
+}
+
+.field::placeholder {
+  color: var(--text-faint);
+}
+
+.field:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in oklch, var(--accent) 22%, transparent);
+}
+
+.field:disabled {
+  background: var(--surface-muted);
+  color: var(--text-muted);
+  cursor: not-allowed;
+}
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 0.75rem;
+  box-shadow: var(--shadow);
+}
+
+/* Long JSON and diagnostics blocks scroll inside themselves, never the page. */
+.scroll-x {
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 999px;
+  border: 2px solid var(--canvas);
+}

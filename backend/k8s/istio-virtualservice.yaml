@@ -1,0 +1,21 @@
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: intuitive-search-vs
+  namespace: default
+spec:
+  hosts:
+    - "*"
+  gateways:
+    - intuitive-search-gateway
+  http:
+    - match:
+        - uri:
+            prefix: /api
+        - uri:
+            prefix: /actuator/health
+      route:
+        - destination:
+            host: intuitive-search-svc
+            port:
+              number: 8080

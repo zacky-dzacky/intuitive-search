@@ -1,0 +1,48 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: intuitive-search
+  namespace: default
+  labels:
+    app: intuitive-search
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: intuitive-search
+  template:
+    metadata:
+      labels:
+        app: intuitive-search
+    spec:
+      containers:
+        - name: backend
+          image: host.docker.internal:5000/intuitive-search-service:0.0.1
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8080
+          envFrom:
+            - configMapRef:
+                name: intuitive-search-config
+            - secretRef:
+                name: intuitive-search-secret
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "256Mi"
+            limits:
+              cpu: "1"
+              memory: "512Mi"
+          livenessProbe:
+            httpGet:
+              path: /actuator/health
+              port: 8080
+            initialDelaySeconds: 45
+            periodSeconds: 15
+            failureThreshold: 5
+          readinessProbe:
+            httpGet:
+              path: /actuator/health
+              port: 8080
+            initialDelaySeconds: 20
+            periodSeconds: 10

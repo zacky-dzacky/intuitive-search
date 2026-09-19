@@ -1,0 +1,234 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Intuitive Search — Demo</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --card: #ffffff; --text: #14171c; --muted: #5d6470;
+    --line: #e2e5ea; --accent: #1b62d6; --accent-soft: #eaf1fd;
+    --warn-bg: #fff7e6; --warn-line: #f0c36d; --radius: 10px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14161a; --card: #1c1f25; --text: #e9ecf1; --muted: #9aa3b0;
+      --line: #2b2f37; --accent: #6fa3ff; --accent-soft: #1d2836;
+      --warn-bg: #2a2415; --warn-line: #6b551f;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 2rem 1rem; background: var(--bg); color: var(--text);
+    font: 15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  .wrap { max-width: 780px; margin: 0 auto; }
+  h1 { font-size: 1.35rem; margin: 0 0 .25rem; }
+  .sub { color: var(--muted); margin: 0 0 1.5rem; font-size: .9rem; }
+  .searchbar { position: relative; }
+  input[type=search] {
+    width: 100%; padding: .85rem 1rem; font-size: 1rem; color: var(--text);
+    background: var(--card); border: 1px solid var(--line);
+    border-radius: var(--radius); outline: none;
+  }
+  input[type=search]:focus { border-color: var(--accent); }
+  .hint { color: var(--muted); font-size: .8rem; margin: .5rem 0 1.25rem; }
+  .card {
+    background: var(--card); border: 1px solid var(--line);
+    border-radius: var(--radius); padding: 1rem 1.15rem; margin-bottom: 1rem;
+  }
+  .card h2 { font-size: .78rem; text-transform: uppercase; letter-spacing: .06em;
+             color: var(--muted); margin: 0 0 .75rem; font-weight: 600; }
+  .sug { display: flex; justify-content: space-between; align-items: center;
+         gap: 1rem; padding: .5rem 0; border-bottom: 1px solid var(--line); }
+  .sug:last-child { border-bottom: 0; }
+  .sug .name { font-weight: 500; }
+  .sug .route { color: var(--muted); font-size: .8rem; font-family: ui-monospace, monospace; }
+  .score { font-variant-numeric: tabular-nums; color: var(--muted); font-size: .8rem; }
+  .field { display: grid; grid-template-columns: 9rem 1fr; gap: .6rem;
+           align-items: center; padding: .45rem 0; }
+  .field label { color: var(--muted); font-size: .85rem; }
+  .field input {
+    padding: .5rem .65rem; font-size: .95rem; color: var(--text);
+    background: var(--bg); border: 1px solid var(--line); border-radius: 7px; width: 100%;
+  }
+  .resolved { color: var(--muted); font-size: .78rem; margin-top: .2rem; }
+  .badge { display: inline-block; padding: .1rem .45rem; border-radius: 99px;
+           font-size: .72rem; background: var(--accent-soft); color: var(--accent); }
+  .notice { background: var(--warn-bg); border: 1px solid var(--warn-line);
+            border-radius: 8px; padding: .7rem .9rem; font-size: .85rem; margin-top: .9rem; }
+  button {
+    padding: .6rem 1.1rem; font-size: .95rem; font-weight: 500; color: #fff;
+    background: var(--accent); border: 0; border-radius: 8px; cursor: pointer;
+  }
+  button.secondary { background: transparent; color: var(--muted); border: 1px solid var(--line); }
+  .actions { display: flex; gap: .6rem; margin-top: 1rem; }
+  details { margin-top: 1rem; }
+  summary { cursor: pointer; color: var(--muted); font-size: .82rem; }
+  pre { overflow-x: auto; font-size: .78rem; background: var(--bg);
+        border: 1px solid var(--line); border-radius: 8px; padding: .8rem; }
+  .empty { color: var(--muted); font-size: .88rem; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Intuitive Searchs</h1>
+  <p class="sub">Type a feature name, an abbreviation, or a whole instruction.</p>
+
+  <div class="searchbar">
+    <input id="q" type="search" autocomplete="off" spellcheck="false"
+           placeholder="try: trf · e-stmt · transfer to mom's 10000 usd">
+  </div>
+  <p class="hint">
+    Typing calls <code>GET /api/search/suggest</code> (Stage&nbsp;1 only — the LLM
+    can't be reached from there). Press <strong>Enter</strong> to run the full pipeline.
+  </p>
+
+  <div id="out"></div>
+</div>
+
+<script>
+// API base URL — two routing modes (see KUBERNETES.md § Routing Modes):
+//
+//   Mode 1 · LoadBalancer (no Istio):
+//     service type: LoadBalancer → reachable at http://k8s.orb.local:8080
+//     set default below to: 'http://k8s.orb.local:8080'
+//
+//   Mode 2 · Istio Ingress Gateway (current):
+//     service type: ClusterIP → traffic enters via istio-ingressgateway at port 80
+//     set default below to: 'http://192.168.139.2'
+//
+//   Override at runtime via query param: ?api=http://your-host:port
+const API = new URLSearchParams(location.search).get('api')
+    ?? (location.port === '80' ? '' : 'http://192.168.139.2');
+const input = document.getElementById('q');
+const out = document.getElementById('out');
+let debounce, lastSeq = 0;
+
+const esc = s => String(s ?? '').replace(/[&<>"']/g,
+  c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+input.addEventListener('input', () => {
+  clearTimeout(debounce);
+  const q = input.value.trim();
+  if (!q) { out.innerHTML = ''; return; }
+  // Stage 1 only, on a short debounce. Never triggers extraction.
+  debounce = setTimeout(() => run(q, false), 120);
+});
+
+input.addEventListener('keydown', e => {
+  if (e.key === 'Enter') {
+    clearTimeout(debounce);
+    const q = input.value.trim();
+    if (q) run(q, true);   // full pipeline
+  }
+});
+
+async function run(query, allowExtraction) {
+  const seq = ++lastSeq;
+  try {
+    // Typeahead uses the suggest endpoint, which hard-codes allow_extraction
+    // to false server-side. That is a stronger guarantee than POSTing the
+    // flag: no client bug can put an LLM call on the keystroke path.
+    const res = allowExtraction
+      ? await fetch(API + '/api/search', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({query, user_id: 'user_1', allow_extraction: true})
+        })
+      : await fetch(API + '/api/search/suggest?q=' + encodeURIComponent(query)
+          + '&userId=user_1');
+    const data = await res.json();
+    if (seq !== lastSeq) return;      // a newer keystroke already won
+    render(data);
+  } catch (err) {
+    out.innerHTML = `<div class="card"><p class="empty">Backend unreachable: ${esc(err.message)}</p></div>`;
+  }
+}
+
+function render(data) {
+  let html = '';
+
+  if (data.action === 'prefill_form') {
+    html += renderForm(data);
+  } else if (data.action === 'navigate') {
+    html += `<div class="card">
+        <h2>Open</h2>
+        <div class="sug">
+          <div><div class="name">${esc(data.display_name)}</div>
+               <div class="route">${esc(data.route)}</div></div>
+          <span class="score">${(data.confidence * 100).toFixed(0)}%</span>
+        </div></div>`;
+  } else if (data.action === 'none') {
+    html += `<div class="card"><p class="empty">No matching feature.</p></div>`;
+  }
+
+  if (data.suggestions?.length) {
+    html += `<div class="card"><h2>${data.action === 'suggest' ? 'Did you mean' : 'Other matches'}</h2>`;
+    for (const s of data.suggestions) {
+      html += `<div class="sug">
+          <div><div class="name">${esc(s.display_name)}</div>
+               <div class="route">${esc(s.route)}</div></div>
+          <span class="score">${(s.confidence * 100).toFixed(0)}%</span>
+        </div>`;
+    }
+    html += `</div>`;
+  }
+
+  html += renderDiagnostics(data);
+  out.innerHTML = html;
+}
+
+function renderForm(data) {
+  let fields = '';
+  for (const [name, value] of Object.entries(data.slots ?? {})) {
+    const isObj = value && typeof value === 'object';
+    const shown = isObj ? (value.raw ?? '') : value;
+    let note = '';
+    if (isObj && value.resolved_name) {
+      note = `<div class="resolved">→ ${esc(value.resolved_name)}
+              ${value.resolved_account_id ? `<span class="badge">${esc(value.resolved_account_id)}</span>` : ''}
+              ${value.resolved_detail ? ' · ' + esc(value.resolved_detail) : ''}</div>`;
+    } else if (isObj && value.ambiguous) {
+      note = `<div class="resolved">Several matches — pick one:
+              ${value.candidates.map(c => esc(c.name)).join(', ')}</div>`;
+    }
+    fields += `<div class="field">
+        <label for="f_${esc(name)}">${esc(name)}</label>
+        <div><input id="f_${esc(name)}" value="${esc(shown)}">${note}</div>
+      </div>`;
+  }
+
+  return `<div class="card">
+      <h2>Pre-filled — review before continuing</h2>
+      <div class="sug" style="border-bottom:1px solid var(--line);margin-bottom:.6rem">
+        <div><div class="name">${esc(data.display_name)}</div>
+             <div class="route">${esc(data.route)}</div></div>
+        <span class="score">${(data.confidence * 100).toFixed(0)}%</span>
+      </div>
+      ${fields}
+      <div class="notice">
+        Nothing has been submitted. These values came from your search text and
+        are yours to edit — the transaction only starts when you confirm it on
+        the real form.
+      </div>
+      <div class="actions">
+        <button onclick="alert('In the real app this hands the values to the ${esc(data.matched_feature)} screen, which asks for confirmation and authentication before anything moves.')">Continue</button>
+        <button class="secondary" onclick="document.getElementById('q').focus()">Cancel</button>
+      </div>
+    </div>`;
+}
+
+function renderDiagnostics(data) {
+  const d = data.diagnostics;
+  if (!d) return '';
+  const timings = Object.entries(d.timings_ms ?? {})
+      .map(([k, v]) => `${k}=${v}ms`).join('  ');
+  return `<details>
+      <summary>Pipeline: ${d.total_ms}ms total · LLM ${d.llm_invoked ? 'called (' + esc(d.llm_provider) + ')' : 'not called'} · stopped at ${esc(d.stopped_at)}</summary>
+      <pre>${esc(timings)}\n\n${esc(JSON.stringify(data, null, 2))}</pre>
+    </details>`;
+}
+</script>
+</body>
+</html>

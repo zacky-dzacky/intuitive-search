@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: intuitive-search-svc
+  namespace: default
+spec:
+  selector:
+    app: intuitive-search
+  # LoadBalancer on OrbStack gets a real local IP you can curl directly.
+  type: ClusterIP
+  ports:
+    - protocol: TCP
+      port: 8080
+      targetPort: 8080
