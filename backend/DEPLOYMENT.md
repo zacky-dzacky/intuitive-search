@@ -35,7 +35,9 @@ docker run --rm \
   -e DATABASE_URL=jdbc:postgresql://host.docker.internal:5432/banksearch \
   -e DATABASE_USER=bank \
   -e DATABASE_PASSWORD=bank \
-  -e LLM_PROVIDER=heuristic \
+  -e LLM_PROVIDER=openai \
+  -e OPENAI_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai \
+  -e OPENAI_API_KEY=... \
   intuitive-search-service:0.0.1
 ```
 
@@ -85,15 +87,18 @@ Edit `k8s/secret.yaml` with your credentials before the first deploy:
 | `DATABASE_URL` | JDBC URL for PostgreSQL |
 | `DATABASE_USER` | Database username |
 | `DATABASE_PASSWORD` | Database password |
+| `OPENAI_API_KEY` | The model provider's key — Gemini now, Azure AI Foundry later. Serves both chat and embeddings |
 | `ANTHROPIC_API_KEY` | Required only when `LLM_PROVIDER=anthropic` |
 
-Edit `k8s/configmap.yaml` to switch the LLM provider or embedding service URL:
+Edit `k8s/configmap.yaml` to switch provider or models. **Moving from Gemini to Azure AI Foundry is these values and the key — no image rebuild:**
 
-| Key | Default | Options |
-|-----|---------|---------|
-| `LLM_PROVIDER` | `heuristic` | `heuristic`, `ollama`, `anthropic` |
-| `EMBEDDING_ENABLED` | `true` | `true`, `false` |
-| `EMBEDDING_BASE_URL` | `http://embedding-svc:8000` | URL of your embedding service |
+| Key | Gemini | Azure AI Foundry |
+|-----|--------|------------------|
+| `LLM_PROVIDER` | `openai` | `openai` |
+| `OPENAI_BASE_URL` | `https://generativelanguage.googleapis.com/v1beta/openai` | `https://<resource>.openai.azure.com/openai/v1` |
+| `OPENAI_CHAT_MODEL` | `gemini-3.6-flash` | chat deployment name |
+| `OPENAI_EMBEDDING_MODEL` | `gemini-embedding-001` | embedding deployment name |
+| `EMBEDDING_DIMENSIONS` | `768` | `768` |
 
 ### 4. Deploy
 
@@ -201,13 +206,23 @@ Ensure `pg_trgm` and `vector` extensions are enabled in that database, and that 
 | `DATABASE_USER` | `bank` | Database username |
 | `DATABASE_PASSWORD` | `bank` | Database password |
 | `SERVER_PORT` | `8080` | HTTP port |
-| `LLM_PROVIDER` | `heuristic` | Slot extraction backend (`heuristic` / `ollama` / `anthropic`) |
+| `LLM_PROVIDER` | `heuristic` | Slot extraction backend (`openai` / `heuristic` / `ollama` / `anthropic`) |
+| `OPENAI_BASE_URL` | — | OpenAI-compatible endpoint (Gemini, Azure AI Foundry, OpenAI) |
+| `OPENAI_API_KEY` | — | Its API key |
+| `OPENAI_CHAT_MODEL` | `gemini-3.6-flash` | Chat model / deployment for slot extraction |
+| `OPENAI_AUTH_HEADER` | `bearer` | `bearer` or `api-key` (legacy Azure gateways) |
+| `OPENAI_REASONING_EFFORT` | — | `none`/`low`/`medium`/`high` for thinking models; omit for non-reasoning deployments |
+| `LLM_TIMEOUT_MS` | `2500` | Stage-2 read timeout; raise for a hosted tier with a long tail (Gemini free tier: 1–11 s) |
 | `ANTHROPIC_API_KEY` | — | Required when `LLM_PROVIDER=anthropic` |
 | `ANTHROPIC_MODEL` | `claude-haiku-4-5` | Claude model for slot extraction |
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama server URL |
 | `OLLAMA_MODEL` | `qwen2.5:3b-instruct` | Ollama model for slot extraction |
 | `EMBEDDING_ENABLED` | `true` | Enable vector search channel |
-| `EMBEDDING_BASE_URL` | `http://localhost:8000` | Embedding service URL |
+| `OPENAI_EMBEDDING_MODEL` | `gemini-embedding-001` | Embedding model / deployment |
+| `OPENAI_EMBEDDING_BASE_URL` | `$OPENAI_BASE_URL` | Only if embeddings are served from a different endpoint |
+| `OPENAI_EMBEDDING_API_KEY` | `$OPENAI_API_KEY` | Only if that endpoint needs a different key |
+| `EMBEDDING_DIMENSIONS` | `768` | Vector size (sent to the provider and enforced; Lucene caps at 1024) |
+| `EMBEDDING_TIMEOUT_MS` | `800` | Per-query embedding deadline on the hot path |
 
 ---
 
@@ -216,7 +231,7 @@ Ensure `pg_trgm` and `vector` extensions are enabled in that database, and that 
 ```
 k8s/
 ├── secret.yaml      # Sensitive env vars (DB credentials, API keys)
-├── configmap.yaml   # Non-sensitive config (LLM provider, embedding URL)
+├── configmap.yaml   # Non-sensitive config (providers, endpoints, model names)
 ├── deployment.yaml  # Backend pod spec with liveness/readiness probes
 ├── service.yaml     # LoadBalancer — exposes port 8080 with a local IP
 └── postgres.yaml    # Postgres 16 pod + ClusterIP service + PVC + init script

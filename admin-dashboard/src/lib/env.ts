@@ -46,13 +46,8 @@ export const env = {
   databaseUrl: () => required("DATABASE_URL"),
   backendBaseUrl: () =>
     (process.env.BACKEND_BASE_URL ?? "http://localhost:8080").replace(/\/$/, ""),
-  embeddingBaseUrl: () =>
-    (process.env.EMBEDDING_BASE_URL ?? "http://localhost:8000").replace(/\/$/, ""),
   adminPassword: () => rejectPlaceholder("ADMIN_PASSWORD", required("ADMIN_PASSWORD"), 10),
   sessionSecret: () => rejectPlaceholder("SESSION_SECRET", required("SESSION_SECRET"), 24),
   sessionTtlHours: () => Number(process.env.SESSION_TTL_HOURS ?? "12"),
   isProduction: () => process.env.NODE_ENV === "production",
 };
-
-/** 384 — must match `features.embedding VECTOR(384)` and the model. */
-export const EMBEDDING_DIMENSIONS = Number(process.env.EMBEDDING_DIMS ?? "384");

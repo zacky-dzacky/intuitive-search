@@ -166,7 +166,7 @@ done
 
 ### Note on trace propagation
 
-Istio automatically captures ingress → sidecar spans. To see end-to-end traces across multiple services (e.g. backend calling embedding-service), the app must forward these headers on outbound calls:
+Istio automatically captures ingress → sidecar spans. To see end-to-end traces across multiple services (e.g. the admin dashboard calling the backend), the app must forward these headers on outbound calls:
 
 ```
 x-request-id

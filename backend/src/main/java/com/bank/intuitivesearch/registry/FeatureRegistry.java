@@ -1,5 +1,6 @@
 package com.bank.intuitivesearch.registry;
 
+import com.bank.intuitivesearch.index.FeatureIndexer;
 import com.bank.intuitivesearch.model.Feature;
 import jakarta.annotation.PostConstruct;
 import java.util.Collection;
@@ -18,12 +19,13 @@ import org.springframework.stereotype.Component;
 /**
  * In-memory snapshot of the feature registry.
  *
- * <p>The retrieval SQL returns only ids and scores; the full feature rows are
- * hydrated from here. ~50 rows is nothing to hold in memory, and it keeps the
- * hot path to a single round trip per channel.
+ * <p>The search index returns only ids and scores; the full feature rows are
+ * hydrated from here. ~50 rows is nothing to hold in memory.
  *
  * <p>Refreshed on a timer, so inserting feature #51 into Postgres makes it
- * searchable without a deploy or a restart.
+ * searchable without a deploy or a restart. Every refresh hands the feature
+ * list to the {@link FeatureIndexer}, which rebuilds the Lucene index only
+ * when something actually changed.
  */
 @Component
 public class FeatureRegistry {
@@ -31,13 +33,15 @@ public class FeatureRegistry {
     private static final Logger log = LoggerFactory.getLogger(FeatureRegistry.class);
 
     private final FeatureRepository repository;
+    private final FeatureIndexer indexer;
     private final AtomicReference<Map<String, Feature>> snapshot =
             new AtomicReference<>(Map.of());
     private final AtomicReference<Map<String, Double>> termIdf =
             new AtomicReference<>(Map.of());
 
-    public FeatureRegistry(FeatureRepository repository) {
+    public FeatureRegistry(FeatureRepository repository, FeatureIndexer indexer) {
         this.repository = repository;
+        this.indexer = indexer;
     }
 
     @PostConstruct
@@ -54,6 +58,15 @@ public class FeatureRegistry {
 
     @Scheduled(fixedDelayString = "${search.registry-refresh-ms:60000}")
     public void refresh() {
+        refresh(false);
+    }
+
+    /**
+     * @param forceReindex re-embed and rebuild the index even if the registry
+     *                     is unchanged — the admin dashboard's "rebuild" button
+     * @return what the index sync did
+     */
+    public FeatureIndexer.SyncReport refresh(boolean forceReindex) {
         List<Feature> features = repository.findAllEnabled();
         Map<String, Feature> byId = features.stream()
                 .collect(Collectors.toUnmodifiableMap(Feature::featureId, Function.identity()));
@@ -61,6 +74,14 @@ public class FeatureRegistry {
         Map<String, Feature> previous = snapshot.getAndSet(byId);
         if (previous.size() != byId.size()) {
             log.info("Feature registry loaded: {} features (was {})", byId.size(), previous.size());
+        }
+        // The registry snapshot is already live; a failed index build must
+        // not roll it back, only get logged and retried next time.
+        try {
+            return indexer.sync(features, forceReindex);
+        } catch (Exception e) {
+            log.error("Feature index rebuild failed; serving the previous generation", e);
+            return new FeatureIndexer.SyncReport(false, features.size(), 0, 0, 0, e.toString());
         }
     }
 

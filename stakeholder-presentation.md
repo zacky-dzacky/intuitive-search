@@ -55,7 +55,7 @@ flowchart LR
     subgraph System["Intuitive Search service"]
         direction LR
         UC_search(["Search for a feature\n→ action: navigate (default)"])
-        UC_stage1(["Stage 1 · Hybrid search\nFTS · pg_trgm · pgvector · containment\n~10 ms, no LLM"])
+        UC_stage1(["Stage 1 · Hybrid search\nLucene in-process: BM25 · trigram · HNSW · containment\n~10 ms, no LLM"])
         UC_signal(["Signal detection\nnumbers · currency · dates · extra tokens\nµs, no LLM"])
         UC_prefill(["Pre-fill a form\n→ action: prefill_form"])
         UC_stage2(["Stage 2 · Extract slots\none generic prompt, feature's schema"])
@@ -63,8 +63,9 @@ flowchart LR
         NoExec["✗ Execute a transaction\n— no such use case exists"]
     end
 
-    Postgres[("🗄️ PostgreSQL\npgvector · pg_trgm")]
-    LLM["🤖 LLM provider\nheuristic · ollama · anthropic"]
+    Postgres[("🗄️ PostgreSQL\nfeature registry · customer data · audit")]
+    LLM["🤖 Frontier model (OpenAI-compatible)\nGemini now · Azure AI Foundry next"]
+    Emb["🔢 Embedding model\nsame endpoint, same key"]
 
     Customer --> UC_search
     Typeahead -- "allow_extraction=false\n(hard-coded)" --> UC_search
@@ -76,7 +77,8 @@ flowchart LR
     UC_prefill -. "«include»" .-> UC_stage3
     UC_stage2 -. "extraction fails →\ndegrade to navigate" .-> UC_search
 
-    UC_stage1 --> Postgres
+    UC_stage1 -. "registry refresh (60 s)\nrebuilds the index" .-> Postgres
+    UC_stage1 --> Emb
     UC_stage3 --> Postgres
     UC_stage2 --> LLM
 
@@ -86,7 +88,7 @@ flowchart LR
     classDef forbidden fill:#fff0f0,stroke:#c92a2a,stroke-dasharray:4 3,color:#c92a2a
     class Customer,Typeahead actor
     class UC_search,UC_stage1,UC_signal,UC_prefill,UC_stage2,UC_stage3 usecase
-    class Postgres,LLM ext
+    class Postgres,LLM,Emb ext
     class NoExec forbidden
 ```
 
@@ -94,7 +96,7 @@ Reading the diagram: solid arrows are actors using the system (or the system usi
 
 Three properties we designed for:
 
-1. **Cheapest thing that could work.** The 80% case — "take me to a screen" — never touches the LLM. It's Postgres.
+1. **Cheapest thing that could work.** The 80% case — "take me to a screen" — never touches the LLM. It's an in-memory index inside the service; the only network call left on that path is the query embedding, and repeated queries skip even that.
 2. **LLM only when the query genuinely carries parameters.** Four independent gates must all open. Typeahead physically cannot reach it.
 3. **Nothing the model returns is trusted.** The parser drops unknown keys, coerces types, and if extraction fails the answer degrades to plain navigation — never a wrong pre-fill.
 
@@ -160,27 +162,32 @@ Two lessons worth naming because they generalise:
 - **A read timeout does not bound a queue.** Our client had a 400 ms read timeout that never fired while p50 sat at 9 seconds. Fixed with a deadline over the *whole* call, a bulkhead, and a circuit breaker.
 - **One CPU-bound worker gets *slower* under concurrency.** Throughput fell going from 8 to 32 clients — torch intra-op threads contending. Fixed with `OMP_NUM_THREADS=1` and 4 processes.
 
-Speaker note: we didn't guess; we measured; the fixes name failure modes, not vibes. Appendix C has the two ranking bugs we only found by running the pipeline — same lesson. Appendix D covers why the embedding service isn't just another Ollama.
+These numbers were taken against the previous stack (Postgres channels + the self-hosted embedding model). The guards from lesson one now sit in front of the hosted provider unchanged; the second lesson no longer applies because we no longer run the model. Retrieval itself got cheaper: it no longer leaves the process.
+
+Speaker note: we didn't guess; we measured; the fixes name failure modes, not vibes. Appendix C has the two ranking bugs we only found by running the pipeline — same lesson. Appendix E covers what changed when we took the feedback on models and Lucene.
 
 ---
 
-# Slide 8 — Provider flexibility, not vendor lock
+# Slide 8 — Frontier models, one adapter, three variables
 
-Stage 2 is one config knob:
+Feedback from the last review: **no open-source models; the office is committing to frontier models on Azure AI Foundry.** Done — for both models the pipeline uses, not just the visible one:
 
-| Provider | Use for | Notes |
+| Was | Now |
+|---|---|
+| Stage 1 embeddings: `bge-small` in a self-hosted Python service | Hosted embedding model through the provider's API |
+| Stage 2 extraction: `qwen2.5:3b` on Ollama | Hosted chat model through the provider's API |
+
+The Foundry sandbox isn't provisioned yet, so today the build runs on Gemini. That is not a detour: **Azure AI Foundry's v1 API and Gemini's API speak the same OpenAI-compatible wire format with a plain API key.** The service has one adapter for that format — no provider SDK, no provider branch — and moving to Foundry is exactly three configuration values:
+
+| | Gemini (today) | Azure AI Foundry (sandbox) |
 |---|---|---|
-| `heuristic` (default) | dev, CI | No model, no network. Regex + slot metadata. Everything runs offline. |
-| `ollama` | on-prem / air-gapped | `qwen2.5:3b-instruct` or `phi-3-mini`. Slot schema constrains decoding to conforming JSON. |
-| `anthropic` | hosted | Claude Haiku. Extraction as a **tool call** whose schema is the feature's slots, so output is structured, not prose. |
+| `OPENAI_BASE_URL` | `generativelanguage.googleapis.com/v1beta/openai` | `<resource>.openai.azure.com/openai/v1` |
+| `OPENAI_API_KEY` | Gemini key | Foundry key |
+| model names | `gemini-3.6-flash` · `gemini-embedding-001` | the deployment names |
 
-Same prompt template, same JSON schema, same defensive parser across all three. Swapping providers is not a project.
+Same prompt, same JSON schema, same defensive parser, same index. `heuristic` (no model, for CI) and `ollama` (air-gapped) remain as options behind the same interface; they are not the direction.
 
-Stage 1 query embeddings stay on sentence-transformers regardless of this choice — a different workload with different constraints (Appendix D).
-
-The compliance implication is deliberate: **`ollama` exists as a first-class option, not an afterthought.** If legal asks "does user-typed text leave our network in Stage 2?", the honest answer with `anthropic` is yes, with `ollama` is no, and switching is a config change — not a rewrite.
-
-Speaker note: for the VP, this is the "we haven't painted ourselves into a corner" slide. Vendor decisions are reversible; the architecture is not tied to a specific model or hosting story.
+Speaker note: this is the "day one on the sandbox is a config change, not a sprint" slide. The acceptance criterion is written down in ADR-001: point the base URL at Foundry, change nothing else, run the smoke corpus.
 
 ---
 
@@ -189,7 +196,7 @@ Speaker note: for the VP, this is the "we haven't painted ourselves into a corne
 The registry needs to be edited by humans who are not backend engineers. The dashboard is the surface for that:
 
 - Full CRUD over the features table, with a structured slot editor
-- **Stale-vector detection.** Editing feature text does not silently drop its vector; the row is marked stale via a source-hash column and one button re-embeds it
+- **Search index view.** What the service's index holds — features, vectors, embedding model, last build — and a rebuild button. Editing a feature re-embeds that one row automatically within 60 s; the button is for the impatient
 - **Search playground.** Run a query against the live API, read the whole diagnostics block (per-channel scores, signal score, whether the LLM fired, per-stage timings)
 - **Analytics** — LLM invocation rate, latency percentiles by path, top queries, and the *unresolved* queries (the registry's real to-do list)
 - Change log of every write
@@ -211,14 +218,14 @@ Speaker note: this is where the BA and product team live day to day. "Which of o
 **Roadmap after pilot** (in payback order):
 
 1. Feed unresolved queries from the dashboard to product weekly as concrete "we should add this" signal
-2. Micro-batching in the embedding service — ~2× throughput per core when scale calls for it
-3. Revisit HNSW sizing only if the registry grows by orders of magnitude
+2. Move Stage 3's payee/account fuzzy match off `pg_trgm` too, so Postgres needs no extensions at all
+3. If the searchable corpus ever becomes help content in the tens of thousands: the same Lucene index on disk, or OpenSearch — not back to a database extension
 
 **One decision to make in this room:**
 
-> **Which Stage-2 provider does the pilot ship with — `ollama` (on-prem, nothing leaves the network) or `anthropic` (hosted, faster iteration)?**
+> **Which Foundry deployments does the pilot use — chat model, embedding model, and the embedding size (we recommend 768)?**
 
-Everything else can proceed on its own schedule. This one gates the pre-launch checklist and has stakeholders across compliance, infra, and cost.
+Everything else can proceed on its own schedule. This one gates the sandbox hand-over: the adapter is ready, the names are the only unknown.
 
 Speaker note: end with a single, answerable question. Do not leave the room without it.
 
@@ -256,12 +263,13 @@ Speaker note: end with a single, answerable question. Do not leave the room with
 
 # Appendix B — Stack
 
-- Java 21 + Spring Boot 3.2 with virtual threads (chained I/O, blocking style, no reactive plumbing)
-- PostgreSQL 16 with `pgvector` and `pg_trgm`
-- FastAPI embedding service (`bge-small-en-v1.5`, 384-dim, CPU)
+- Java 21 + Spring Boot 3.4 with virtual threads (chained I/O, blocking style, no reactive plumbing)
+- **Apache Lucene 10, in process** — the Stage-1 index (BM25, trigram, HNSW vectors), rebuilt from Postgres when the registry changes
+- PostgreSQL 16 with `pg_trgm` only (Stage 3) — the feature registry, customer data and audit; no `pgvector`
+- **Frontier models via one OpenAI-compatible adapter** — Gemini today, Azure AI Foundry on sandbox delivery; chat + embeddings, API key
 - Kubernetes (local `orb.local`, production TBD), Istio for mesh + observability
-- Admin dashboard: Next.js 15 (App Router) + Tailwind, no ORM
-- 38 unit tests covering the signal gate, hostile-JSON parsing, tsquery sanitisation, prompt genericity, Stage-3 normalisation, and containment ranking
+- Admin dashboard: Next.js 16 (App Router) + Tailwind, no ORM
+- 75 unit tests covering the signal gate, hostile-JSON parsing, prompt genericity, Stage-3 normalisation, containment ranking, the Lucene index, the incremental indexer, and the adapter's wire contract
 
 # Appendix C — Two ranking problems we only found by running it (for Q&A)
 
@@ -271,11 +279,13 @@ Both would have passed a green unit-test suite. Worth having ready if the Tech L
 
 Fix — a **containment channel** (does the query literally contain one of the feature's naming terms? — payload can dilute similarity, it cannot dilute this) plus a **margin-based gate** ("high confidence" really means "clear gap to the runner-up", not "raw score above X").
 
-**2. `ivfflat` silently lost the right answer.** At `lists=8, probes=1`, a query searches one partition. `send 250 usd to landlord` came back with transfer scoring 0.0 on vector while topping every lexical channel — not an error, just a quietly missing candidate. Now HNSW: no training-data requirement, much better default recall at this size.
+**2. `ivfflat` silently lost the right answer.** At `lists=8, probes=1`, a query searches one partition. `send 250 usd to landlord` came back with transfer scoring 0.0 on vector while topping every lexical channel — not an error, just a quietly missing candidate. We moved to HNSW then; Lucene's vector index is HNSW by construction, so the lesson carried over for free.
 
-# Appendix D — Why embeddings don't run on Ollama (for Q&A)
+# Appendix D — Why embeddings didn't run on Ollama (historical, for Q&A)
 
-The obvious question after Slide 8: if `ollama` is the on-prem answer for Stage 2, why is Stage 1 a separate Python service running `bge-small-en-v1.5` through sentence-transformers? Four reasons, all about the workload rather than the vendor.
+*Written for the previous revision, when Stage 1 ran a self-hosted model. Kept because the reasoning — "the two vector spaces must come from one runtime" — is exactly why the indexer now re-embeds the whole catalogue through the hosted model rather than mixing sources.*
+
+The obvious question after the old Slide 8: if `ollama` is the on-prem answer for Stage 2, why is Stage 1 a separate Python service running `bge-small-en-v1.5` through sentence-transformers? Four reasons, all about the workload rather than the vendor.
 
 **1. Query and document vectors must come from one runtime.** The registry's vectors were produced offline by sentence-transformers (`precompute_embeddings.py`). Ollama serves through llama.cpp with a quantised GGUF and its own tokenizer, and emits slightly different vectors for the same text. Moving only the query side would drift the two spaces apart; moving both means re-embedding the registry through the new model before any traffic switches. It is a migration, not a config change.
 
@@ -286,3 +296,19 @@ The obvious question after Slide 8: if `ollama` is the on-prem answer for Stage 
 **4. The knobs we rely on are thirty lines of Python.** BGE's query-side instruction prefix, unit-normalised output (so pgvector cosine is a plain dot product), the 128-token cap that bounds worst-case latency, and the typeahead prefix cache all live in `app.py`. Under Ollama each of those moves into the Java client.
 
 **When we would switch:** a GPU node, or a mandate to consolidate on one serving layer. Then: a separate Ollama instance for embeddings, keep-alive pinned, prefix added in the Java client, and the registry re-embedded through the same runtime before traffic moves.
+
+# Appendix E — Lucene instead of pgvector: what actually changed (for Q&A)
+
+The second piece of feedback was "leverage Apache Lucene and drop the vector DB; Lucene can hold vectors in memory." We looked at it properly rather than just agreeing, and it fits — with four things worth saying out loud.
+
+**What was removed.** There was never a separate vector database. The vector channel was a Postgres *extension* (`pgvector`) on the same database as the registry, alongside two more extensions' worth of full-text and trigram matching. What is gone is those extensions and one network hop per channel. In a bank, not needing `CREATE EXTENSION` on the corporate Postgres is a real governance win — that is the strongest argument for the change, and it is the stakeholders' argument, not ours.
+
+**What Lucene does.** All three retrieval channels now live in one in-process index: BM25 over stemmed text (was `tsvector`), padded-trigram matching (was `pg_trgm`), HNSW vectors (was `pgvector`). Same 0..1 scales, same merge weights, same ranking tests. The corpus is 67 catalogue rows; the index builds in milliseconds and takes kilobytes. Retrieval no longer leaves the JVM.
+
+**"In memory" is right for this corpus, and we know where the edge is.** The index is a *cache*, rebuilt from Postgres whenever the registry changes; Postgres stays the system of record for the catalogue, the customer data and the audit trail. That is the correct shape for 10² – 10⁴ rows that change rarely. If the searchable corpus ever becomes help articles in the tens of thousands, the same index goes to memory-mapped disk or to OpenSearch — which *is* Lucene, same fields, same queries. The path forward is not back to a database extension.
+
+**One constraint we found by reading the code, not the brochure.** Lucene's stock vector codec caps vectors at **1024 dimensions** (Elasticsearch and OpenSearch raise it by overriding the codec). Frontier embedding models default to 1536 or 3072. So the adapter asks the provider for **768-dimensional** vectors — every model we target is trained for that truncation, and the provider does it server-side when asked — and enforces it on the way back. It is a setting, but it is a setting we had to know about, and it is why the Foundry decision on Slide 10 includes the embedding size.
+
+**What is *not* changed, honestly.** Stage 3 still fuzzy-matches payee and account names with `pg_trgm` on the customer tables. Making Postgres fully extension-free is a listed follow-up, not part of this change; it is ~10 rows per customer and can be done in the JVM the same way.
+
+Speaker note: the answer to "does it make sense?" is yes, and the ADR (`docs/adr/002`) records the reasoning and the trade-offs so the next person doesn't have to redo the research.

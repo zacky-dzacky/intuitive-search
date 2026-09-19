@@ -18,42 +18,87 @@ import org.springframework.web.client.RestClient;
 public class HttpClientConfig {
 
     /**
-     * Embedding service client. Timeouts are aggressive on purpose: this call
-     * sits inside the &lt;100ms search-as-you-type budget, so it is better to
-     * drop the vector channel than to blow the budget.
+     * Query-embedding client, on the hot path. Timeouts are aggressive on
+     * purpose: this call sits inside the search-as-you-type budget, so it is
+     * better to drop the vector channel than to blow the budget.
+     *
+     * <p>Points at the OpenAI-compatible provider named in
+     * {@code search.embedding.openai}, which defaults to the Stage-2 endpoint
+     * and key.
      */
     @Bean
     RestClient embeddingRestClient(SearchProperties properties, ObjectMapper objectMapper) {
-        return build(properties.getEmbedding().getBaseUrl(),
-                Duration.ofMillis(properties.getEmbedding().getTimeoutMs()),
+        return embeddingClient(properties, Duration.ofMillis(properties.getEmbedding().getTimeoutMs()),
                 objectMapper);
+    }
+
+    /**
+     * Document-embedding client, used by the index builder. Same endpoint,
+     * relaxed deadline — the catalogue goes over in one batch, and a few
+     * seconds at startup is not a few seconds per keystroke.
+     */
+    @Bean
+    RestClient documentEmbeddingRestClient(SearchProperties properties, ObjectMapper objectMapper) {
+        return embeddingClient(properties,
+                Duration.ofMillis(properties.getEmbedding().getDocumentTimeoutMs()), objectMapper);
+    }
+
+    private static RestClient embeddingClient(SearchProperties properties, Duration readTimeout,
+                                              ObjectMapper objectMapper) {
+        return openAi(properties.getEmbedding().getOpenai(), readTimeout, objectMapper);
     }
 
     /** Local-LLM (Ollama / vLLM) client for Stage 2. */
     @Bean
     RestClient llmRestClient(SearchProperties properties, ObjectMapper objectMapper) {
-        return build(properties.getLlm().getOllama().getBaseUrl(),
+        return builder(properties.getLlm().getOllama().getBaseUrl(),
                 Duration.ofMillis(properties.getLlm().getTimeoutMs()),
-                objectMapper);
+                objectMapper).build();
     }
 
-    private static RestClient build(String baseUrl, Duration readTimeout, ObjectMapper objectMapper) {
+    /** OpenAI-compatible chat client for Stage 2 (Gemini now, Azure AI Foundry later). */
+    @Bean
+    RestClient openAiChatRestClient(SearchProperties properties, ObjectMapper objectMapper) {
+        return openAi(properties.getLlm().getOpenai(),
+                Duration.ofMillis(properties.getLlm().getTimeoutMs()), objectMapper);
+    }
+
+    private static RestClient openAi(SearchProperties.OpenAi config, Duration readTimeout,
+                                     ObjectMapper objectMapper) {
+        RestClient.Builder builder = builder(config.getBaseUrl(), readTimeout, objectMapper);
+        String key = config.getApiKey() == null ? "" : config.getApiKey();
+        if ("api-key".equalsIgnoreCase(config.getAuthHeader())) {
+            builder.defaultHeader("api-key", key);
+        } else {
+            builder.defaultHeader("Authorization", "Bearer " + key);
+        }
+        return builder.build();
+    }
+
+    private static RestClient.Builder builder(String baseUrl, Duration readTimeout,
+                                              ObjectMapper objectMapper) {
         ClientHttpRequestFactorySettings settings = ClientHttpRequestFactorySettings.defaults()
                 .withConnectTimeout(Duration.ofMillis(500))
                 .withReadTimeout(readTimeout);
         ClientHttpRequestFactory factory =
                 ClientHttpRequestFactoryBuilder.detect().build(settings);
 
+        // A trailing slash on the base URL would double up with the
+        // per-call "/embeddings" and 404 on strict servers.
+        String base = baseUrl == null ? "" : baseUrl.trim();
+        while (base.endsWith("/")) {
+            base = base.substring(0, base.length() - 1);
+        }
+
         return RestClient.builder()
-                .baseUrl(baseUrl)
+                .baseUrl(base)
                 .requestFactory(factory)
                 // Reuse Boot's ObjectMapper so unknown fields from the other
                 // service don't blow up deserialization.
                 .messageConverters(converters -> converters.stream()
                         .filter(MappingJackson2HttpMessageConverter.class::isInstance)
                         .map(MappingJackson2HttpMessageConverter.class::cast)
-                        .forEach(c -> c.setObjectMapper(objectMapper)))
-                .build();
+                        .forEach(c -> c.setObjectMapper(objectMapper)));
     }
 
     /**

@@ -43,11 +43,13 @@ search:
   # ---- Stage 1: hybrid retrieval -----------------------------------
   candidate-limit: 10
   # Relative weights for the retrieval channels. If a channel is unavailable
-  # (e.g. the embedding service is down) its weight is dropped and the
+  # (e.g. the embedding provider is down) its weight is dropped and the
   # remaining ones are renormalised, so confidence stays comparable.
-  #   keyword     - Postgres full-text rank
-  #   trigram     - pg_trgm fuzzy / abbreviation similarity
-  #   vector      - pgvector cosine similarity
+  # The first three run against the in-process Lucene index (see
+  # index/FeatureIndex.java); the registry itself lives in Postgres.
+  #   keyword     - BM25 over stemmed text, with prefix matching for typeahead
+  #   trigram     - trigram similarity for typos and abbreviations
+  #   vector      - cosine similarity over HNSW
   #   containment - the query literally contains one of the feature's naming
   #                 terms. Carries the most weight of the lexical channels
   #                 because it is the only one that stays reliable when a
@@ -100,12 +102,33 @@ search:
 
   # ---- Stage 2: LLM slot extraction --------------------------------
   llm:
-    # heuristic | ollama | anthropic
+    # heuristic | openai | ollama | anthropic
     # `heuristic` needs no model at all and keeps the pipeline runnable in
-    # dev/CI. Switch to `ollama` for on-prem, `anthropic` for hosted.
+    # dev/CI. `openai` is the office standard: any provider speaking the
+    # OpenAI wire format with an API key — Gemini today, Azure AI Foundry
+    # when the sandbox lands. Switching between them is the three OPENAI_*
+    # values below and nothing else.
     provider: ${LLM_PROVIDER:heuristic}
-    timeout-ms: 2500
+    # Read timeout for the extraction call. 2.5s suited an on-cluster model;
+    # a hosted provider's tail depends on its tier — Gemini free tier was
+    # measured at 0.9s–11s for the *same* request. Raise per environment
+    # rather than in code; a timeout still degrades to navigate, never fails.
+    timeout-ms: ${LLM_TIMEOUT_MS:2500}
     max-output-tokens: 512
+    openai:
+      # Gemini:        https://generativelanguage.googleapis.com/v1beta/openai
+      # Azure Foundry: https://<resource>.openai.azure.com/openai/v1
+      base-url: ${OPENAI_BASE_URL:}
+      api-key: ${OPENAI_API_KEY:}
+      # Gemini: a model name (gemini-3.6-flash). Foundry: the *deployment* name.
+      model: ${OPENAI_CHAT_MODEL:gemini-3.6-flash}
+      # bearer (OpenAI, Gemini, Foundry v1) | api-key (legacy Azure gateways)
+      auth-header: ${OPENAI_AUTH_HEADER:bearer}
+      # For thinking models only (Gemini 3.x, o-series): none | low | medium | high.
+      # Extraction needs none of it; `low` took Gemini 3.6 Flash from ~3.9s to
+      # ~1.6s with the same output. Leave empty for a non-reasoning deployment —
+      # the field is then not sent at all.
+      reasoning-effort: ${OPENAI_REASONING_EFFORT:}
     ollama:
       base-url: ${OLLAMA_BASE_URL:http://localhost:11434}
       model: ${OLLAMA_MODEL:qwen2.5:3b-instruct}
@@ -114,18 +137,45 @@ search:
       model: ${ANTHROPIC_MODEL:claude-haiku-4-5}
       # API key resolves from ANTHROPIC_API_KEY or an `ant auth login` profile.
 
-  # ---- Embedding service -------------------------------------------
+  # ---- Embedding provider ------------------------------------------
+  # Same contract as Stage 2: any OpenAI-compatible /embeddings endpoint with
+  # an API key — Gemini now, Azure Foundry later. With no endpoint or key the
+  # vector channel is simply dropped and search runs lexical-only; that is
+  # the dev/CI mode, there is no self-hosted model.
   embedding:
     enabled: ${EMBEDDING_ENABLED:true}
-    base-url: ${EMBEDDING_BASE_URL:http://localhost:8000}
+    openai:
+      # Default to the chat provider's endpoint and key; override when the
+      # embedding model is served from somewhere else.
+      base-url: ${OPENAI_EMBEDDING_BASE_URL:${OPENAI_BASE_URL:}}
+      api-key: ${OPENAI_EMBEDDING_API_KEY:${OPENAI_API_KEY:}}
+      # Gemini: gemini-embedding-001. Foundry: e.g. text-embedding-3-small deployment.
+      model: ${OPENAI_EMBEDDING_MODEL:gemini-embedding-001}
+      auth-header: ${OPENAI_AUTH_HEADER:bearer}
+    # Vector size. Sent to the provider as `dimensions` and enforced on the
+    # way back (a longer answer is truncated and re-normalised — the models
+    # we target are Matryoshka-trained, so that is what the provider would
+    # do server-side). Lucene's stock codec caps this at 1024, and 768 is
+    # the sweet spot every target model documents.
+    dimensions: ${EMBEDDING_DIMENSIONS:768}
     # End-to-end deadline for the whole operation, including time queued
     # waiting for an HTTP connection. A plain read timeout does not cover
-    # that, and under load that is where the time actually goes.
-    timeout-ms: 400
-    dimensions: 384
-    # Bulkhead. The model serves ~55 req/s on 8 CPU cores, so admitting more
-    # than a handful of concurrent calls just builds a queue nobody can pay
-    # for. Past this, the vector channel is skipped immediately.
+    # that, and under load that is where the time actually goes. A hosted
+    # provider round trip is ~150–400ms; typeahead repeats are served from
+    # the query cache and never wait on it.
+    timeout-ms: ${EMBEDDING_TIMEOUT_MS:800}
+    # The catalogue is embedded in one batch at index build; not on the
+    # request path, so it can afford to wait.
+    document-timeout-ms: 30000
+    # Recent query vectors kept in-process. With a hosted model each miss
+    # is latency and money, and typeahead sends the same prefixes constantly.
+    query-cache-size: 4096
+    # Text prepended before embedding. The target models want none; kept
+    # for instruction-tuned models that document a query-side hint.
+    query-prefix: ""
+    document-prefix: ""
+    # Bulkhead. Past this many in-flight embedding calls, the vector channel
+    # is skipped immediately rather than queued for.
     max-concurrent: 16
     # Circuit breaker: stop paying the deadline on every request once the
     # service is clearly unhealthy.

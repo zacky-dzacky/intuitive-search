@@ -121,8 +121,8 @@ export interface ResourceDef {
   defaultSort: { column: string; direction: "asc" | "desc" };
   /**
    * Derived display columns, keyed by result alias. Raw SQL from config — for
-   * state that belongs in the database rather than in the browser, like
-   * whether a feature's embedding is stale.
+   * state that belongs in the database rather than in the browser, like a
+   * feature's slot count.
    *
    * Aliases may appear in `listColumns` and be sorted on, exactly like real
    * columns.
@@ -144,11 +144,12 @@ export interface ResourceDef {
   /** Column set to `now()` on every update, when the table has one. */
   touchColumn?: string;
   /**
-   * This table's text feeds the vector index, so the form offers to re-embed
-   * the row it just saved. Only `features` does today; it is a flag rather
-   * than a hardcoded resource name so a second embedded table costs nothing.
+   * This table feeds the search index, so the form offers to have the
+   * backend rebuild it right after saving rather than on its next refresh.
+   * Only `features` does today; it is a flag rather than a hardcoded
+   * resource name so a second indexed table costs nothing.
    */
-  reembedOnSave?: boolean;
+  reindexOnSave?: boolean;
 }
 
 export function fieldByName(resource: ResourceDef, name: string): FieldDef | undefined {

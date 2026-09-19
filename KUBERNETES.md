@@ -9,7 +9,6 @@ OrbStack provides the local cluster. Postgres runs on the host machine (not in k
 | Service | Deployment name | Accessible at | Istio sidecar |
 |---------|----------------|---------------|---------------|
 | Backend (Spring) | `intuitive-search` | see [Routing Modes](#routing-modes) below | yes (2/2) |
-| Embedding (FastAPI) | `embedding-service` | cluster-internal only (`embedding-service-svc:8000`) | yes (2/2) |
 | Admin dashboard (Next.js) | `admin-dashboard` | `k8s.orb.local:3001` | yes (2/2) |
 
 ---
@@ -144,19 +143,13 @@ kubectl apply -f backend/k8s/istio-virtualservice.yaml
 
 All three pods run with an Envoy sidecar injected by Istio (`2/2` containers). Internal traffic between services goes through the sidecar on both ends, which Kiali visualises as edges in the graph.
 
-### Internal traffic path (embedding service)
+### Internal traffic
 
-```
-intuitive-search pod  (Envoy sidecar outbound)
-  │
-  ▼  http://embedding-service-svc:8000
-embedding-service-svc  (ClusterIP)
-  │
-  ▼
-embedding-service pod  (Envoy sidecar inbound)
-```
+The backend's only in-cluster dependency is Postgres on the host; its model
+calls (chat and embeddings) are egress to the hosted provider through the
+sidecar. The admin dashboard calls the backend through `intuitive-search-svc`.
 
-`intuitive-search` never talks directly to the embedding pod IP — it always resolves through the Kubernetes Service. The sidecars intercept that traffic and can apply mTLS, retries, and circuit-breaking transparently.
+Services never talk to pod IPs directly — they resolve through the Kubernetes Service. The sidecars intercept that traffic and can apply mTLS, retries, and circuit-breaking transparently.
 
 ### mTLS mode
 
@@ -182,7 +175,7 @@ spec:
 EOF
 ```
 
-Verify in Kiali: the edge between `intuitive-search` and `embedding-service-svc` should show a lock icon (mTLS) when strict mode is active.
+Verify in Kiali: the edge between `admin-dashboard` and `intuitive-search-svc` should show a lock icon (mTLS) when strict mode is active.
 
 ---
 
@@ -223,34 +216,20 @@ $PSQL -d banksearch -f db/02_seed.sql
 # Backend
 cd backend && ./deploy-local.sh && cd ..
 
-# Embedding service
-cd embedding-service
-docker build -t host.docker.internal:5000/embedding-service:0.0.1 .
-docker push host.docker.internal:5000/embedding-service:0.0.1
-kubectl apply -f k8s/
-kubectl rollout status deployment/embedding-service
-cd ..
-
 # Admin dashboard
 cd admin-dashboard && ./deploy-local.sh && cd ..
 ```
 
-### 3. Backfill embeddings + vector index (one-time, after embedding pod is Ready)
+The backend needs `OPENAI_API_KEY` in `backend/k8s/secret.yaml` (copy from
+`secret.example.yaml`) and the provider/model values in `backend/k8s/configmap.yaml`
+— Gemini by default, Azure AI Foundry by changing three values. On startup it
+embeds the catalogue in one call and builds its search index in memory; there
+is no backfill step and no vector index to create.
+
+### 3. Upgrading a database from before the Lucene change (one-time)
 
 ```bash
-cd embedding-service
-pip install -r requirements.txt
-python precompute_embeddings.py
-cd ..
-psql -U bank -d banksearch -f db/03_indexes.sql
-```
-
-Or run inside the pod if you don't want Python locally:
-
-```bash
-kubectl exec -it deploy/embedding-service -- \
-  env DATABASE_URL=postgresql://bank:bank@host.docker.internal:5432/banksearch \
-  python precompute_embeddings.py
+psql -U bank -d banksearch -f db/05_drop_search_columns.sql
 ```
 
 ### 4. Admin dashboard migration (one-time)
@@ -266,13 +245,6 @@ psql -U bank -d banksearch -f admin-dashboard/db/04_admin.sql
 ```bash
 # Backend only
 cd backend && ./deploy-local.sh
-
-# Embedding only
-cd embedding-service
-docker build -t host.docker.internal:5000/embedding-service:0.0.1 .
-docker push host.docker.internal:5000/embedding-service:0.0.1
-kubectl rollout restart deployment/embedding-service
-kubectl rollout status deployment/embedding-service
 
 # Admin only
 cd admin-dashboard && ./deploy-local.sh
@@ -291,7 +263,6 @@ kubectl get svc
 
 # Logs (live)
 kubectl logs -f deploy/intuitive-search
-kubectl logs -f deploy/embedding-service
 kubectl logs -f deploy/admin-dashboard
 ```
 
@@ -303,7 +274,6 @@ kubectl logs -f deploy/admin-dashboard
 
 ```bash
 kubectl scale deployment intuitive-search --replicas=0
-kubectl scale deployment embedding-service --replicas=0
 kubectl scale deployment admin-dashboard   --replicas=0
 ```
 
@@ -311,7 +281,6 @@ Bring it back:
 
 ```bash
 kubectl scale deployment intuitive-search --replicas=1
-kubectl scale deployment embedding-service --replicas=1
 kubectl scale deployment admin-dashboard   --replicas=1
 ```
 
@@ -319,15 +288,20 @@ kubectl scale deployment admin-dashboard   --replicas=1
 
 ```bash
 kubectl delete -f backend/k8s/
-kubectl delete -f embedding-service/k8s/
 kubectl delete -f admin-dashboard/k8s/
+```
+
+A cluster deployed before the Python embedding service was removed from the
+repo still has its objects; its manifests are gone, so delete them by name:
+
+```bash
+kubectl delete deployment,svc embedding-service embedding-service-svc
 ```
 
 ### Remove everything (full teardown)
 
 ```bash
 kubectl delete -f backend/k8s/ \
-               -f embedding-service/k8s/ \
                -f admin-dashboard/k8s/
 ```
 

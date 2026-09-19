@@ -110,12 +110,6 @@ kubectl rollout restart deployment/intuitive-search
 kubectl rollout restart deployment/postgres
 ```
 
-If the embedding service is also deployed:
-
-```bash
-kubectl rollout restart deployment/embedding-service
-```
-
 ### 3.3 Confirm the sidecar is present
 
 ```bash

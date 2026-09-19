@@ -4,11 +4,25 @@ metadata:
   name: intuitive-search-config
   namespace: default
 data:
-  LLM_PROVIDER: "heuristic"
-  EMBEDDING_ENABLED: "true"
-  EMBEDDING_BASE_URL: "http://embedding-service-svc:8000"
-  # OLLAMA_BASE_URL: "http://ollama-svc:11434"
-  # ANTHROPIC_MODEL: "claude-haiku-4-5"
+  # ---- Models -------------------------------------------------------
+  # Both stages use the OpenAI-compatible adapter. The values below are for
+  # Gemini; the Azure AI Foundry sandbox needs only these swapped (and the
+  # key in secret.yaml). See docs/adr/001-frontier-models-openai-compatible-adapter.md
+  LLM_PROVIDER: "openai"
+  OPENAI_BASE_URL: "https://generativelanguage.googleapis.com/v1beta/openai"
+  OPENAI_CHAT_MODEL: "gemini-3.6-flash"
+  # Gemini 3.x thinks before answering; extraction doesn't need it. Remove for
+  # a non-reasoning Foundry deployment (it would reject the parameter).
+  OPENAI_REASONING_EFFORT: "low"
+  # Gemini free tier has a long tail (measured 1–11 s per call); a paid tier
+  # or a Foundry deployment should bring this back toward the 2500 default.
+  LLM_TIMEOUT_MS: "10000"
+  OPENAI_EMBEDDING_MODEL: "gemini-embedding-001"
+  EMBEDDING_DIMENSIONS: "768"
+  # Azure AI Foundry — uncomment and fill in when the sandbox is provisioned:
+  # OPENAI_BASE_URL: "https://<resource>.openai.azure.com/openai/v1"
+  # OPENAI_CHAT_MODEL: "<chat deployment name>"
+  # OPENAI_EMBEDDING_MODEL: "<embedding deployment name>"
   # Overrides logging.level.com.bank.intuitivesearch in application.yml, which
   # defaults to INFO and so hides the per-query DEBUG line in SearchOrchestrator.
   LOGGING_LEVEL_COM_BANK_INTUITIVESEARCH: "DEBUG"

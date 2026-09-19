@@ -41,7 +41,7 @@ yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
 
-# ---- Python (embedding-service, loadtest) ----
+# ---- Python (loadtest) ----
 __pycache__/
 *.py[cod]
 *$py.class

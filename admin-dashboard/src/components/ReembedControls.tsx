@@ -6,28 +6,20 @@ import { useState } from "react";
 import { buttonClass } from "./ui";
 
 /**
- * The button that replaces `python precompute_embeddings.py`.
+ * "Rebuild now" for operators who do not want to wait out the backend's
+ * refresh interval, and "Re-embed all" for after an embedding model change.
  *
- * A full re-embed is a couple of minutes of forward passes, so the control
- * stays disabled and says what it is doing rather than pretending to be
- * instant.
+ * A forced rebuild sends the whole catalogue to the embedding provider in
+ * one call, so the control stays disabled and says what it is doing rather
+ * than pretending to be instant.
  */
-export function ReembedControls({
-  staleCount,
-  featureId,
-  compact = false,
-}: {
-  staleCount?: number;
-  /** Present on a per-row control: re-embed just this feature. */
-  featureId?: string;
-  compact?: boolean;
-}) {
+export function ReembedControls({ compact = false }: { compact?: boolean }) {
   const router = useRouter();
   const [busy, setBusy] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [failed, setFailed] = useState(false);
 
-  const run = async (payload: Record<string, unknown>, label: string) => {
+  const run = async (force: boolean, label: string) => {
     setBusy(label);
     setMessage(null);
     setFailed(false);
@@ -36,10 +28,13 @@ export function ReembedControls({
       const response = await fetch("/api/embeddings", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify(payload),
+        body: JSON.stringify({ force }),
       });
       const body = (await response.json().catch(() => ({}))) as {
+        rebuilt?: boolean;
         embedded?: number;
+        withVector?: number;
+        features?: number;
         tookMs?: number;
         error?: string;
       };
@@ -50,13 +45,20 @@ export function ReembedControls({
         return;
       }
 
-      setMessage(
-        body.embedded
-          ? `Embedded ${body.embedded} feature${body.embedded === 1 ? "" : "s"} in ${(
-              (body.tookMs ?? 0) / 1000
-            ).toFixed(1)}s.`
-          : "Nothing needed embedding.",
-      );
+      if (body.error) {
+        setFailed(true);
+        setMessage(
+          `Index rebuilt with ${body.withVector ?? 0} of ${body.features ?? 0} vectors — embedding failed: ${body.error}`,
+        );
+      } else if (!body.rebuilt) {
+        setMessage("Nothing changed since the last build.");
+      } else {
+        setMessage(
+          `Rebuilt: ${body.features ?? 0} features, ${body.embedded ?? 0} embedded, in ${(
+            (body.tookMs ?? 0) / 1000
+          ).toFixed(1)}s.`,
+        );
+      }
       router.refresh();
     } catch (error) {
       setFailed(true);
@@ -66,43 +68,26 @@ export function ReembedControls({
     }
   };
 
-  if (featureId) {
-    return (
-      <button
-        type="button"
-        disabled={busy !== null}
-        className="text-sm font-medium text-accent hover:underline disabled:opacity-60"
-        onClick={() => run({ featureIds: [featureId] }, "one")}
-      >
-        {busy ? "Embedding…" : "Re-embed"}
-      </button>
-    );
-  }
-
   return (
     <div className={compact ? "flex flex-wrap items-center gap-3" : "space-y-3"}>
       <div className="flex flex-wrap gap-2">
         <button
           type="button"
-          disabled={busy !== null || staleCount === 0}
+          disabled={busy !== null}
           className={buttonClass("primary")}
-          onClick={() => run({ scope: "stale" }, "stale")}
+          onClick={() => run(false, "rebuild")}
         >
-          {busy === "stale"
-            ? "Embedding…"
-            : staleCount
-              ? `Re-embed ${staleCount} stale`
-              : "Nothing stale"}
+          {busy === "rebuild" ? "Rebuilding…" : "Rebuild index"}
         </button>
         <button
           type="button"
           disabled={busy !== null}
           className={buttonClass("secondary")}
           onClick={() => {
-            if (!confirm("Re-embed every feature? This runs the model over the whole registry.")) {
+            if (!confirm("Re-embed every feature? This sends the whole registry to the embedding provider.")) {
               return;
             }
-            void run({ scope: "all" }, "all");
+            void run(true, "all");
           }}
         >
           {busy === "all" ? "Embedding…" : "Re-embed all"}

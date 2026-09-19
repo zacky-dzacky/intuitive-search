@@ -1,11 +1,12 @@
 package com.bank.intuitivesearch.search;
 
 import com.bank.intuitivesearch.config.SearchProperties;
+import com.bank.intuitivesearch.embedding.EmbeddingClient;
+import com.bank.intuitivesearch.index.ChannelHit;
+import com.bank.intuitivesearch.index.FeatureIndex;
 import com.bank.intuitivesearch.model.Feature;
 import com.bank.intuitivesearch.model.FeatureMatch;
 import com.bank.intuitivesearch.registry.FeatureRegistry;
-import com.bank.intuitivesearch.registry.FeatureRepository;
-import com.bank.intuitivesearch.registry.FeatureRepository.ChannelHit;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
@@ -24,9 +25,12 @@ import org.springframework.stereotype.Service;
 /**
  * Stage 1 — hybrid retrieval.
  *
- * <p>Runs the lexical (full-text + trigram) and vector channels concurrently,
- * then merges them with configurable weights. This stage always runs and must
- * stay fast: it is the whole budget for a pure navigation query.
+ * <p>Runs the lexical (full-text + trigram) channel against the in-process
+ * Lucene index while the query embedding is fetched, then the vector channel
+ * against the same index, and merges the lot with configurable weights. This
+ * stage always runs and must stay fast: it is the whole budget for a pure
+ * navigation query — and with the index in memory, the embedding call is the
+ * only network hop left in it.
  *
  * <p>If the vector channel is unavailable, its weight is dropped and the
  * remaining weights are renormalised, so a degraded search still produces
@@ -40,18 +44,18 @@ public class HybridSearchService {
     /** Shorter fragments than this match too much to be evidence of intent. */
     private static final int MIN_PREFIX = 3;
 
-    private final FeatureRepository repository;
+    private final FeatureIndex index;
     private final FeatureRegistry registry;
     private final EmbeddingClient embeddingClient;
     private final SearchProperties properties;
     private final ExecutorService executor;
 
-    public HybridSearchService(FeatureRepository repository,
+    public HybridSearchService(FeatureIndex index,
                                FeatureRegistry registry,
                                EmbeddingClient embeddingClient,
                                SearchProperties properties,
                                ExecutorService searchExecutor) {
-        this.repository = repository;
+        this.index = index;
         this.registry = registry;
         this.embeddingClient = embeddingClient;
         this.properties = properties;
@@ -64,11 +68,10 @@ public class HybridSearchService {
             return List.of();
         }
         int limit = properties.getCandidateLimit();
-        String tsQuery = toTsQuery(normalised);
 
-        // Fan out: the embedding round trip and the lexical SQL overlap.
+        // Fan out: the embedding round trip and the lexical search overlap.
         Future<List<ChannelHit>> lexicalFuture =
-                executor.submit(() -> repository.lexicalSearch(tsQuery, normalised, limit));
+                executor.submit(() -> index.lexicalSearch(normalised, limit));
         Future<Optional<float[]>> embeddingFuture =
                 executor.submit(() -> embeddingClient.embedQuery(rawQuery));
 
@@ -76,7 +79,7 @@ public class HybridSearchService {
         Optional<float[]> embedding = await(embeddingFuture, Optional.empty(), "query embedding");
 
         List<ChannelHit> vector = embedding
-                .map(vec -> await(executor.submit(() -> repository.vectorSearch(vec, limit)),
+                .map(vec -> await(executor.submit(() -> index.vectorSearch(vec, limit)),
                         List.<ChannelHit>of(), "vector search"))
                 .orElse(List.of());
 
@@ -101,9 +104,9 @@ public class HybridSearchService {
             slot[2] = Math.max(slot[2], clamp(hit.vectorScore()));
         }
 
-        // Containment runs over the whole in-memory registry, not just the SQL
-        // hits: ~67 features is nothing to scan, and it lets a feature the
-        // lexical query missed still surface if the query names it outright.
+        // Containment runs over the whole in-memory registry, not just the
+        // index hits: ~67 features is nothing to scan, and it lets a feature
+        // the lexical query missed still surface if the query names it outright.
         List<String> queryTokens = List.of(NON_ALNUM.split(normalisedQuery));
         for (Feature feature : registry.all()) {
             double containment = containmentScore(feature, queryTokens, registry::idf);
@@ -221,23 +224,6 @@ public class HybridSearchService {
     @FunctionalInterface
     interface DoubleUnaryTermWeight {
         double weightOf(String termKey);
-    }
-
-    /**
-     * Builds a prefix {@code to_tsquery} expression from the user's words.
-     *
-     * <p>Prefix matching ({@code tran:*}) is what makes search-as-you-type
-     * feel instant. Tokens are stripped to alphanumerics first, so nothing the
-     * user types can be interpreted as tsquery syntax.
-     */
-    static String toTsQuery(String normalisedQuery) {
-        List<String> tokens = new ArrayList<>();
-        for (String token : NON_ALNUM.split(normalisedQuery)) {
-            if (!token.isBlank()) {
-                tokens.add(token + ":*");
-            }
-        }
-        return String.join(" | ", tokens);
     }
 
     static String normalise(String query) {

@@ -3,8 +3,8 @@ import Link from "next/link";
 import { RankedBars } from "@/components/charts/RankedBars";
 import { Badge, Card, LinkButton, Note, PageHeader, StatTile } from "@/components/ui";
 import { query } from "@/lib/db";
+import { indexStatus } from "@/lib/embeddings";
 import { formatRelative } from "@/lib/format";
-import { FEATURE_EMBEDDING_STALE_SQL } from "@/lib/featureDocument";
 import { setupState } from "@/lib/setup";
 
 export const dynamic = "force-dynamic";
@@ -14,7 +14,6 @@ interface RegistryStats {
   enabled: string;
   with_params: string;
   categories: string;
-  stale: string;
   slots: string;
 }
 
@@ -52,16 +51,12 @@ export default async function OverviewPage() {
         <Card title="One migration to run">
           <div className="space-y-3 p-5 text-sm text-text-muted">
             <p>
-              The database is reachable but is missing
-              {!setup.hasEmbeddingProvenance ? " the embedding provenance columns" : ""}
-              {!setup.hasEmbeddingProvenance && !setup.hasAdminAudit ? " and" : ""}
-              {!setup.hasAdminAudit ? " the admin_audit table" : ""}. The migration is additive and
-              idempotent — it changes nothing the search pipeline reads, so the backend needs no
-              restart:
+              The database is reachable but is missing the admin_audit table. The migration is
+              additive and idempotent — it changes nothing the search pipeline reads, so the
+              backend needs no restart:
             </p>
             <pre className="scroll-x rounded-lg bg-surface-muted p-3 font-mono text-xs">
-              {`docker compose exec -T postgres psql -U bank -d banksearch \\
-  < admin-dashboard/db/04_admin.sql`}
+              {`psql -U bank -d banksearch -f admin-dashboard/db/04_admin.sql`}
             </pre>
             <p>Reload this page once it has run.</p>
           </div>
@@ -70,13 +65,12 @@ export default async function OverviewPage() {
     );
   }
 
-  const [statsRows, categoryRows, changeRows] = await Promise.all([
+  const [statsRows, categoryRows, changeRows, index] = await Promise.all([
     query<RegistryStats>(`
       SELECT COUNT(*)::text                                        AS total,
              COUNT(*) FILTER (WHERE enabled)::text                 AS enabled,
              COUNT(*) FILTER (WHERE has_params)::text              AS with_params,
              COUNT(DISTINCT category)::text                        AS categories,
-             COUNT(*) FILTER (WHERE ${FEATURE_EMBEDDING_STALE_SQL})::text AS stale,
              COALESCE(SUM(jsonb_array_length(slots)), 0)::text     AS slots
       FROM features
     `),
@@ -93,10 +87,11 @@ export default async function OverviewPage() {
       ORDER BY at DESC
       LIMIT 6
     `),
+    indexStatus(),
   ]);
 
   const stats = statsRows[0];
-  const stale = Number(stats?.stale ?? 0);
+  const missingVectors = index.features - index.withVector;
   const disabled = Number(stats?.total ?? 0) - Number(stats?.enabled ?? 0);
 
   return (
@@ -127,10 +122,16 @@ export default async function OverviewPage() {
         />
         <StatTile label="Categories" value={stats?.categories ?? "0"} hint="Open taxonomy" />
         <StatTile
-          label="Stale vectors"
-          value={stale}
-          tone={stale > 0 ? "warn" : "ok"}
-          hint={stale > 0 ? "Re-embed from the Embeddings page" : "Vector coverage is current"}
+          label="Search index"
+          value={index.reachable ? `${index.withVector}/${index.features}` : "—"}
+          tone={!index.reachable || missingVectors > 0 || index.lastError ? "warn" : "ok"}
+          hint={
+            !index.reachable
+              ? "Search API unreachable"
+              : missingVectors > 0
+                ? `${missingVectors} without a vector — see Search index`
+                : "Every indexed feature has a vector"
+          }
         />
       </div>
 

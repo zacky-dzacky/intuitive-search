@@ -1,4 +1,3 @@
-import { FEATURE_EMBEDDING_STALE_SQL } from "@/lib/featureDocument";
 
 import type { ResourceDef } from "./types";
 
@@ -167,23 +166,13 @@ const features: ResourceDef = {
     "category",
     "has_params",
     "slot_count",
-    "embedding_stale",
     "enabled",
   ],
   searchColumns: ["feature_id", "display_name", "description"],
   defaultSort: { column: "updated_at", direction: "desc" },
   touchColumn: "updated_at",
-  reembedOnSave: true,
+  reindexOnSave: true,
   computedColumns: {
-    embedding_stale: {
-      sql: FEATURE_EMBEDDING_STALE_SQL,
-      label: "Vector",
-      kind: "flag",
-      trueLabel: "stale",
-      trueTone: "warn",
-      falseLabel: "current",
-      falseTone: "ok",
-    },
     slot_count: { sql: "jsonb_array_length(slots)", label: "Slots" },
   },
   invariants: [

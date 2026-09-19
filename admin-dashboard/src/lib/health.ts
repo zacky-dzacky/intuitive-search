@@ -4,11 +4,12 @@ import { env } from "./env";
 import { pingDatabase } from "./db";
 
 /**
- * Liveness of the three things the dashboard depends on.
+ * Liveness of the two things the dashboard depends on.
  *
- * Each is probed independently and none of them is fatal: the registry stays
+ * Each is probed independently and neither is fatal: the registry stays
  * editable while the backend is down, and the playground says so rather than
- * the whole page failing.
+ * the whole page failing. The embedding provider is not probed from here —
+ * the backend owns that relationship and reports it on the Search index page.
  */
 export interface ServiceHealth {
   name: string;
@@ -40,7 +41,7 @@ async function probe(name: string, target: string, path: string): Promise<Servic
 }
 
 export async function systemHealth(): Promise<ServiceHealth[]> {
-  const [database, backend, embedding] = await Promise.all([
+  const [database, backend] = await Promise.all([
     pingDatabase().then((ok) => ({
       name: "Postgres",
       target: "features registry",
@@ -48,7 +49,6 @@ export async function systemHealth(): Promise<ServiceHealth[]> {
       detail: ok ? "reachable" : "unreachable — check DATABASE_URL",
     })),
     probe("Search API", env.backendBaseUrl(), "/actuator/health"),
-    probe("Embedding service", env.embeddingBaseUrl(), "/health"),
   ]);
-  return [database, backend, embedding];
+  return [database, backend];
 }

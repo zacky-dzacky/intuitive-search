@@ -2,8 +2,8 @@
 -- Seed data: ~50 app features + demo customer data.
 --
 -- Adding feature #51 is exactly one INSERT here (or one API/admin write).
--- `embedding` is left NULL — embedding-service/precompute_embeddings.py
--- backfills it offline.
+-- Nothing else is needed: the backend embeds and indexes the row on its
+-- next registry refresh.
 -- =====================================================================
 
 -- ---------------------------------------------------------------------

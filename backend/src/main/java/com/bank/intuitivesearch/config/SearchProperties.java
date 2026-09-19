@@ -83,12 +83,59 @@ public class SearchProperties {
         public Set<String> stopWordSet() { return toSet(stopWords); }
     }
 
+    /**
+     * Connection details for any service that speaks the OpenAI wire format.
+     *
+     * <p>Azure AI Foundry ({@code https://<resource>.openai.azure.com/openai/v1})
+     * and Gemini ({@code https://generativelanguage.googleapis.com/v1beta/openai})
+     * both do, with a plain API key. Swapping providers is a change to these
+     * three values and nothing else.
+     */
+    public static class OpenAi {
+        private String baseUrl = "";
+        private String apiKey = "";
+        private String model = "";
+        /**
+         * {@code bearer} sends {@code Authorization: Bearer <key>} (OpenAI,
+         * Gemini, Foundry v1). {@code api-key} sends the legacy Azure header
+         * for gateways that still insist on it.
+         */
+        private String authHeader = "bearer";
+        /**
+         * Chat only. For models that "think" before answering (Gemini 3.x,
+         * OpenAI o-series), how much: {@code none} | {@code low} |
+         * {@code medium} | {@code high}. Slot extraction wants as little as
+         * possible — measured on Gemini 3.6 Flash, {@code low} cut the call
+         * from ~3.9s to ~1.6s with identical output. Left empty the field is
+         * not sent at all, which is what a non-reasoning deployment needs.
+         */
+        private String reasoningEffort = "";
+
+        public String getBaseUrl() { return baseUrl; }
+        public void setBaseUrl(String baseUrl) { this.baseUrl = baseUrl; }
+        public String getApiKey() { return apiKey; }
+        public void setApiKey(String apiKey) { this.apiKey = apiKey; }
+        public String getModel() { return model; }
+        public void setModel(String model) { this.model = model; }
+        public String getAuthHeader() { return authHeader; }
+        public void setAuthHeader(String authHeader) { this.authHeader = authHeader; }
+        public String getReasoningEffort() { return reasoningEffort; }
+        public void setReasoningEffort(String reasoningEffort) { this.reasoningEffort = reasoningEffort; }
+
+        public boolean isConfigured() {
+            return baseUrl != null && !baseUrl.isBlank()
+                    && apiKey != null && !apiKey.isBlank()
+                    && model != null && !model.isBlank();
+        }
+    }
+
     public static class Llm {
         private String provider = "heuristic";
         private long timeoutMs = 2500;
         private int maxOutputTokens = 512;
         private Ollama ollama = new Ollama();
         private Anthropic anthropic = new Anthropic();
+        private OpenAi openai = new OpenAi();
 
         public static class Ollama {
             private String baseUrl = "http://localhost:11434";
@@ -115,14 +162,26 @@ public class SearchProperties {
         public void setOllama(Ollama ollama) { this.ollama = ollama; }
         public Anthropic getAnthropic() { return anthropic; }
         public void setAnthropic(Anthropic anthropic) { this.anthropic = anthropic; }
+        public OpenAi getOpenai() { return openai; }
+        public void setOpenai(OpenAi openai) { this.openai = openai; }
     }
 
     public static class Embedding {
         private boolean enabled = true;
-        private String baseUrl = "http://localhost:8000";
+        private OpenAi openai = new OpenAi();
         /** End-to-end deadline, including time queued for an HTTP connection. */
         private long timeoutMs = 400;
-        private int dimensions = 384;
+        /** Deadline for the batch call that embeds the whole catalogue at index build. */
+        private long documentTimeoutMs = 30000;
+        private int dimensions = 768;
+        /**
+         * Text prepended to queries / documents before embedding. Most hosted
+         * models want none; some instruction-tuned ones want a query-side hint.
+         */
+        private String queryPrefix = "";
+        private String documentPrefix = "";
+        /** Recently embedded queries kept in-process — typeahead repeats prefixes constantly. */
+        private int queryCacheSize = 4096;
         /** Bulkhead: in-flight embedding calls. Beyond this, skip the channel. */
         private int maxConcurrent = 16;
         private int circuitBreakerFailures = 5;
@@ -130,12 +189,20 @@ public class SearchProperties {
 
         public boolean isEnabled() { return enabled; }
         public void setEnabled(boolean enabled) { this.enabled = enabled; }
-        public String getBaseUrl() { return baseUrl; }
-        public void setBaseUrl(String baseUrl) { this.baseUrl = baseUrl; }
+        public OpenAi getOpenai() { return openai; }
+        public void setOpenai(OpenAi openai) { this.openai = openai; }
         public long getTimeoutMs() { return timeoutMs; }
         public void setTimeoutMs(long timeoutMs) { this.timeoutMs = timeoutMs; }
+        public long getDocumentTimeoutMs() { return documentTimeoutMs; }
+        public void setDocumentTimeoutMs(long documentTimeoutMs) { this.documentTimeoutMs = documentTimeoutMs; }
         public int getDimensions() { return dimensions; }
         public void setDimensions(int dimensions) { this.dimensions = dimensions; }
+        public String getQueryPrefix() { return queryPrefix; }
+        public void setQueryPrefix(String queryPrefix) { this.queryPrefix = queryPrefix; }
+        public String getDocumentPrefix() { return documentPrefix; }
+        public void setDocumentPrefix(String documentPrefix) { this.documentPrefix = documentPrefix; }
+        public int getQueryCacheSize() { return queryCacheSize; }
+        public void setQueryCacheSize(int queryCacheSize) { this.queryCacheSize = queryCacheSize; }
         public int getMaxConcurrent() { return maxConcurrent; }
         public void setMaxConcurrent(int maxConcurrent) { this.maxConcurrent = maxConcurrent; }
         public int getCircuitBreakerFailures() { return circuitBreakerFailures; }

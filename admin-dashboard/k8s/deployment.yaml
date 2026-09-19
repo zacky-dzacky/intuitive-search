@@ -24,8 +24,6 @@ spec:
           env:
             - name: BACKEND_BASE_URL
               value: "http://intuitive-search-svc:8080"
-            - name: EMBEDDING_BASE_URL
-              value: "http://embedding-service-svc:8000"
           envFrom:
             - secretRef:
                 name: admin-dashboard-secret

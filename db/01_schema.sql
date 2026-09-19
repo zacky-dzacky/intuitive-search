@@ -1,24 +1,19 @@
 -- =====================================================================
 -- Intuitive Search — schema
--- PostgreSQL 16 + pgvector + pg_trgm
+-- PostgreSQL 16 + pg_trgm
+--
+-- Postgres is the system of record for the feature catalogue, the demo
+-- customer data and the audit log. It is NOT the search index: the backend
+-- builds that in process (Apache Lucene, see backend/.../index/) from the
+-- `features` rows on every refresh. So there is no vector column, no
+-- tsvector, no pgvector — nothing here that cannot be rebuilt from the
+-- plain columns in milliseconds.
+--
+-- pg_trgm remains for Stage 3 only: fuzzy matching a spoken payee or
+-- account name against the customer's own rows.
 -- =====================================================================
 
-CREATE EXTENSION IF NOT EXISTS vector;
 CREATE EXTENSION IF NOT EXISTS pg_trgm;
-
--- ---------------------------------------------------------------------
--- `array_to_string` is declared STABLE (it depends on type output
--- functions), so PostgreSQL refuses it inside a GENERATED column. The
--- text[] -> text case genuinely is immutable, so wrap it. This is the
--- standard workaround, not a correctness compromise.
--- ---------------------------------------------------------------------
-CREATE OR REPLACE FUNCTION immutable_array_to_string(arr TEXT[], sep TEXT)
-RETURNS TEXT
-LANGUAGE sql
-IMMUTABLE
-PARALLEL SAFE
-STRICT
-AS $$ SELECT array_to_string(arr, sep) $$;
 
 -- ---------------------------------------------------------------------
 -- Feature registry.
@@ -40,54 +35,20 @@ CREATE TABLE IF NOT EXISTS features (
     keywords        TEXT[]      NOT NULL DEFAULT '{}',
     -- abbreviations / shorthand users actually type ("trf", "e-stmt", "cc")
     aliases         TEXT[]      NOT NULL DEFAULT '{}',
-    -- 384 dims == bge-small-en-v1.5 / all-MiniLM-L6-v2
-    embedding       VECTOR(384),
     has_params      BOOLEAN     NOT NULL DEFAULT FALSE,
     -- [{"name","type","description","required","enum","resolver"}]
     slots           JSONB       NOT NULL DEFAULT '[]'::jsonb,
     enabled         BOOLEAN     NOT NULL DEFAULT TRUE,
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
 
-    -- Full-text document. GENERATED so it can never drift from the source
-    -- columns and so inserting a feature needs no trigger/app support.
-    search_document TSVECTOR GENERATED ALWAYS AS (
-        to_tsvector(
-            'english',
-            coalesce(display_name, '') || ' ' ||
-            coalesce(immutable_array_to_string(keywords, ' '), '') || ' ' ||
-            coalesce(immutable_array_to_string(aliases, ' '), '') || ' ' ||
-            coalesce(description, '')
-        )
-    ) STORED,
-
-    -- Lowercased blob for trigram / fuzzy + abbreviation matching.
-    match_text TEXT GENERATED ALWAYS AS (
-        lower(
-            coalesce(display_name, '') || ' ' ||
-            coalesce(immutable_array_to_string(keywords, ' '), '') || ' ' ||
-            coalesce(immutable_array_to_string(aliases, ' '), '')
-        )
-    ) STORED,
-
     CONSTRAINT features_slots_is_array CHECK (jsonb_typeof(slots) = 'array'),
     CONSTRAINT features_params_have_slots
         CHECK (has_params = FALSE OR jsonb_array_length(slots) > 0)
 );
 
-CREATE INDEX IF NOT EXISTS features_fts_idx
-    ON features USING gin (search_document);
-
-CREATE INDEX IF NOT EXISTS features_trgm_idx
-    ON features USING gin (match_text gin_trgm_ops);
-
-CREATE INDEX IF NOT EXISTS features_keywords_idx
-    ON features USING gin (keywords);
-
-CREATE INDEX IF NOT EXISTS features_aliases_idx
-    ON features USING gin (aliases);
-
--- ivfflat needs data to build meaningful lists; it is created in
--- 03_indexes.sql, after the seed + embedding backfill has run.
+-- The registry is read whole by the backend (one SELECT per refresh) and
+-- edited row-by-row by the admin dashboard; the primary key is the only
+-- index that earns its keep.
 
 -- ---------------------------------------------------------------------
 -- Minimal customer-data tables used by Stage 3 (entity resolution).

@@ -7,7 +7,7 @@ import java.util.List;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
-/** Query construction and ranking for Stage 1 — the part that runs on every keystroke. */
+/** Query normalisation and containment ranking for Stage 1 — the part that runs on every keystroke. */
 class HybridSearchQueryTest {
 
     /** Every term is unique across this fixture, so IDF is a no-op here. */
@@ -88,25 +88,8 @@ class HybridSearchQueryTest {
     }
 
     @Test
-    @DisplayName("tsquery uses prefix matching so typeahead matches partial words")
-    void buildsPrefixTsQuery() {
-        assertThat(HybridSearchService.toTsQuery("transfer money"))
-                .isEqualTo("transfer:* | money:*");
-    }
-
-    @Test
-    @DisplayName("punctuation cannot inject tsquery syntax")
-    void sanitisesTsQuery() {
-        assertThat(HybridSearchService.toTsQuery("e-statement & !x"))
-                .isEqualTo("e:* | statement:* | x:*");
-        assertThat(HybridSearchService.toTsQuery("'; drop table features--"))
-                .doesNotContain(";", "'", "-");
-    }
-
-    @Test
-    @DisplayName("empty input produces an empty tsquery, not a broken one")
-    void handlesEmptyQuery() {
-        assertThat(HybridSearchService.toTsQuery("")).isEmpty();
+    @DisplayName("queries are lower-cased and whitespace-collapsed before anything sees them")
+    void normalisesQuery() {
         assertThat(HybridSearchService.normalise("  Transfer   MONEY ")).isEqualTo("transfer money");
         assertThat(HybridSearchService.normalise(null)).isEmpty();
     }

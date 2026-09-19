@@ -3,11 +3,13 @@
 ## Overview
 
 - **Engine**: PostgreSQL 16
-- **Extensions**: `pgvector` (vector similarity search), `pg_trgm` (fuzzy/trigram search)
+- **Extensions**: `pg_trgm` (fuzzy matching of payee / account names in Stage 3). Nothing else — no `pgvector`.
 - **Database name**: `banksearch`
 - **Default credentials**: user `bank`, password `bank`
 
-The database has two roles: the **search pipeline** reads `features`, `accounts`, and `payees`; the **admin dashboard** also writes to `features` and reads `admin_audit` and `search_audit`.
+The database has two roles: the **search pipeline** reads `features` (whole, on a 60 s refresh), `accounts`, and `payees`; the **admin dashboard** also writes to `features` and reads `admin_audit` and `search_audit`.
+
+**Postgres is the system of record, not the search index.** The backend builds its own index in process (Apache Lucene — full-text, trigram and vector channels) from the plain `features` columns every time the registry changes. Vectors are obtained from the configured embedding provider at build time and live only in that index. So there is no vector column, no `tsvector`, no HNSW index and no backfill step in this database; everything retrieval needs is derived from the columns below in milliseconds. See `docs/adr/002-lucene-replaces-pgvector.md`.
 
 ---
 
@@ -68,10 +70,12 @@ Migrations are plain SQL files in `db/`, applied in name order. There is no migr
 
 | File | When to run | What it does |
 |------|-------------|--------------|
-| `db/01_schema.sql` | Once, on first setup | Creates extensions, the `immutable_array_to_string` helper, and all tables + indexes (except the vector index) |
+| `db/01_schema.sql` | Once, on first setup | Creates `pg_trgm` and all tables + indexes |
 | `db/02_seed.sql` | Once, after schema | Inserts 67 features, 3 demo accounts, 6 demo payees |
-| `db/03_indexes.sql` | After embeddings are backfilled | Drops the legacy `ivfflat` index (if any), builds the `HNSW` vector index, runs `ANALYZE` |
-| `admin-dashboard/db/04_admin.sql` | Once, before using the admin dashboard | Adds `embedding_source_hash` / `embedded_at` columns to `features`, creates `admin_audit`, adds analytics indexes on `search_audit` |
+| `admin-dashboard/db/04_admin.sql` | Once, before using the admin dashboard | Creates `admin_audit`, adds analytics indexes on `search_audit` |
+| `db/05_drop_search_columns.sql` | Once, on a database created **before** search moved to Lucene | Drops the `embedding` / provenance / generated search columns, their indexes, the helper function and the `vector` extension |
+
+(`03_indexes.sql` — the pgvector HNSW index — no longer exists.)
 
 ### Applying migrations
 
@@ -88,17 +92,17 @@ $PSQL -d banksearch -f db/01_schema.sql
 $PSQL -d banksearch -f db/02_seed.sql
 ```
 
-**Vector index (run after embedding backfill):**
-```bash
-$PSQL -d banksearch -f db/03_indexes.sql
-```
-
 **Admin dashboard migration (run once):**
 ```bash
 $PSQL -d banksearch -f admin-dashboard/db/04_admin.sql
 ```
 
-**Adding a new migration file** — name it `05_whatever.sql`, use `IF NOT EXISTS` / `ON CONFLICT DO NOTHING` throughout, and apply it manually. The ordering is `01 → 02 → 03 → 04 → 05 …`.
+**Upgrading an existing database (created before the Lucene change):**
+```bash
+$PSQL -d banksearch -f db/05_drop_search_columns.sql
+```
+
+**Adding a new migration file** — name it `06_whatever.sql`, use `IF NOT EXISTS` / `ON CONFLICT DO NOTHING` throughout, and apply it manually. The ordering is `01 → 02 → 04 → 05 → 06 …`.
 
 ---
 
@@ -117,31 +121,18 @@ The feature registry. **This table is the configuration.** Adding a new banking 
 | `route` | `TEXT` | Frontend path the search result opens |
 | `keywords` | `TEXT[]` | Natural-language terms for full-text matching |
 | `aliases` | `TEXT[]` | Abbreviations users actually type (`trf`, `e-stmt`) |
-| `embedding` | `VECTOR(384)` | 384-dimensional bge-small-en-v1.5 vector; NULL until backfilled |
 | `has_params` | `BOOLEAN` | `TRUE` = feature accepts slot parameters and can trigger LLM extraction |
 | `slots` | `JSONB` | Array of slot definitions; each has `name`, `type`, `required`, `resolver`, optional `enum` |
 | `enabled` | `BOOLEAN` | Soft-disable without deleting |
 | `updated_at` | `TIMESTAMPTZ` | Set on every write |
-| `search_document` | `TSVECTOR GENERATED` | Auto-built from `display_name + keywords + aliases + description`; used by full-text search |
-| `match_text` | `TEXT GENERATED` | Lowercased `display_name + keywords + aliases`; used by trigram matching |
-| `embedding_source_hash` | `TEXT` | MD5 of the document that produced the vector (added by `04_admin.sql`); used to detect stale embeddings |
-| `embedded_at` | `TIMESTAMPTZ` | When the vector was last written (added by `04_admin.sql`) |
+
+The backend derives everything else from these: the full-text field (`display_name + keywords + aliases + description`, stemmed), the trigram field (`display_name + keywords + aliases`, lower-cased) and the embedding text (`display_name. keywords. aliases. description`) are all built in `backend/.../index/FeatureDocument.java` at index time.
 
 **Constraints:**
 - `slots` must be a JSON array
 - If `has_params = TRUE` then `slots` must be non-empty
 
-**Indexes:**
-
-| Index | Type | Purpose |
-|-------|------|---------|
-| `features_fts_idx` | GIN on `search_document` | Full-text search (prefix queries) |
-| `features_trgm_idx` | GIN on `match_text` (trgm) | Trigram / fuzzy / abbreviation matching |
-| `features_keywords_idx` | GIN on `keywords` | Array containment lookups |
-| `features_aliases_idx` | GIN on `aliases` | Array containment lookups |
-| `features_embedding_hnsw_idx` | HNSW on `embedding` (cosine) | Vector similarity search; built by `03_indexes.sql` after seed |
-
-**Why HNSW instead of ivfflat** — `ivfflat` with `lists = 8` and `probes = 1` silently dropped the correct feature from the candidate set on the 67-row registry (measured: cosine 0.0 while topping every lexical channel). HNSW requires no training data and has far better default recall; build cost is irrelevant at this size.
+**Indexes:** the primary key only. The table is read whole once a minute and edited a row at a time; retrieval indexes live in the backend's Lucene index.
 
 ---
 
@@ -219,14 +210,6 @@ Change log written by the admin dashboard for every create/update/delete/reembed
 
 ---
 
-## Custom objects
-
-### `immutable_array_to_string(arr TEXT[], sep TEXT) → TEXT`
-
-A wrapper around `array_to_string` declared `IMMUTABLE` so it can be used in `GENERATED` columns. PostgreSQL refuses `array_to_string` there because it is only `STABLE`; the `text[] → text` case is genuinely immutable, making this the standard safe workaround.
-
----
-
 ## Adding a feature
 
 One INSERT, no code change, no deploy:
@@ -252,13 +235,7 @@ INSERT INTO features (
 );
 ```
 
-Then backfill the embedding so the vector channel can find it:
-
-```bash
-cd embedding-service && python precompute_embeddings.py
-```
-
-The backend's in-memory registry cache refreshes within 60 seconds (`search.registry-refresh-ms`). No restart required.
+Nothing else. The backend's registry refresh (60 seconds, `search.registry-refresh-ms`) notices the new row, embeds it — one call, just that row — and rebuilds the search index. No restart, no backfill script. The admin dashboard's *Rebuild index* button does the same without the wait.
 
 **Slot `resolver` values:**
 
@@ -277,29 +254,9 @@ The backend's in-memory registry cache refreshes within 60 seconds (`search.regi
 
 ## Maintenance
 
-**Check which features are missing embeddings:**
-```sql
-SELECT feature_id, display_name
-FROM features
-WHERE embedding IS NULL AND enabled = TRUE;
-```
-
-**Check for stale embeddings (requires `04_admin.sql` to have been applied):**
-```sql
-SELECT feature_id, display_name, embedded_at
-FROM features
-WHERE embedding_source_hash IS DISTINCT FROM
-      md5(btrim(concat_ws('. ',
-          nullif(display_name, ''),
-          nullif(array_to_string(keywords, ', '), ''),
-          nullif(array_to_string(aliases, ', '), ''),
-          nullif(description, ''))))
-  AND embedding IS NOT NULL;
-```
-
-**Rebuild the vector index after a large batch of new embeddings:**
+**Check what the search index holds** — that is a backend question now, not a database one:
 ```bash
-/opt/homebrew/opt/postgresql@16/bin/psql -d banksearch -f db/03_indexes.sql
+curl -s localhost:8080/api/admin/index | jq
 ```
 
 **Start/stop the local Postgres service:**

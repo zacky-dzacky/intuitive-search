@@ -48,7 +48,7 @@ export function ResourceForm({
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [formError, setFormError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [reembed, setReembed] = useState(Boolean(resource.reembedOnSave));
+  const [reindex, setReindex] = useState(Boolean(resource.reindexOnSave));
   const [status, setStatus] = useState<string | null>(null);
 
   const id = record ? String(record[resource.primaryKey]) : null;
@@ -104,19 +104,22 @@ export function ResourceForm({
 
       const savedId = String(body[resource.primaryKey] ?? id);
 
-      if (resource.reembedOnSave && reembed) {
-        setStatus("Saved. Embedding…");
-        const embedResponse = await fetch("/api/embeddings", {
+      if (resource.reindexOnSave && reindex) {
+        setStatus("Saved. Updating the search index…");
+        // The backend re-embeds only the rows whose text changed, so this
+        // is one embedding call for the row just saved.
+        const indexResponse = await fetch("/api/embeddings", {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ featureIds: [savedId] }),
+          body: JSON.stringify({ force: false }),
         });
-        if (!embedResponse.ok) {
-          const embedBody = (await embedResponse.json().catch(() => ({}))) as { error?: string };
+        if (!indexResponse.ok) {
+          const indexBody = (await indexResponse.json().catch(() => ({}))) as { error?: string };
           // The row is saved either way — say what happened rather than
-          // rolling back a good edit over an unavailable model.
+          // rolling back a good edit over an unavailable backend. The
+          // backend picks the change up on its next refresh regardless.
           setFormError(
-            `Saved, but re-embedding failed: ${embedBody.error ?? embedResponse.status}. The Embeddings page can retry it.`,
+            `Saved, but the index rebuild failed: ${indexBody.error ?? indexResponse.status}. The backend will pick the change up within 60 seconds.`,
           );
           setBusy(false);
           router.refresh();
@@ -207,16 +210,16 @@ export function ResourceForm({
           Cancel
         </Link>
 
-        {resource.reembedOnSave ? (
+        {resource.reindexOnSave ? (
           <label className="flex cursor-pointer items-center gap-2 text-sm text-text-muted">
             <input
               type="checkbox"
               className="h-4 w-4 accent-[var(--accent)]"
-              checked={reembed}
+              checked={reindex}
               disabled={busy}
-              onChange={(event) => setReembed(event.target.checked)}
+              onChange={(event) => setReindex(event.target.checked)}
             />
-            Re-embed after saving
+            Update search index after saving
           </label>
         ) : null}
 

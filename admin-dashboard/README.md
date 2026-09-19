@@ -20,9 +20,9 @@ be quietly contradicting the thing it manages.
 
 | Section | What it is for |
 |---|---|
-| **Overview** | Registry shape at a glance, stale-vector count, recent changes, first-run migration check |
+| **Overview** | Registry shape at a glance, search-index coverage, recent changes, first-run migration check |
 | **Features** | Full CRUD over the registry, with a structured editor for `slots` — the parameter contract that drives Stage 2 and Stage 3 |
-| **Embeddings** | Which features have a current vector, which have drifted, and one button that fixes them |
+| **Search index** | What the backend's in-process Lucene index holds — features, vectors, embedding model, last build — and a rebuild button |
 | **Search playground** | Run a query against the live API and read the whole `diagnostics` block: per-channel scores, signal score, whether the LLM fired, per-stage timings |
 | **Analytics** | LLM invocation rate, latency percentiles split by path, top queries, and the unresolved queries that are really the registry's to-do list |
 | **Payees / Accounts** | The demo customer data Stage 3 resolves against |
@@ -36,7 +36,7 @@ The dashboard is additive: it reads the same database the search backend
 reads, and changes nothing the pipeline depends on.
 
 ```bash
-# 1. The search stack must be up (deploy backend + embedding to k8s first)
+# 1. The search stack must be up (deploy the backend to k8s first)
 #    See README.md quick start steps 1–2.
 
 # 2. One migration, idempotent, no backend restart needed
@@ -65,7 +65,6 @@ exact command rather than failing on the first query that needs a new column.
 |---|---|---|
 | `DATABASE_URL` | — | libpq URL for `banksearch` (note: not the JDBC form the backend uses) |
 | `BACKEND_BASE_URL` | `http://localhost:8080` | The Spring API, for the playground |
-| `EMBEDDING_BASE_URL` | `http://localhost:8000` | The FastAPI service, for re-embedding |
 | `ADMIN_PASSWORD` | — | The single admin password |
 | `SESSION_SECRET` | — | Signs the session cookie; `openssl rand -hex 32` |
 | `SESSION_TTL_HOURS` | `12` | Session lifetime |
@@ -169,33 +168,25 @@ pattern is one typo away from being absent.
 
 ---
 
-## Embeddings
+## Search index
 
-Editing a feature's text **does not** drop its vector. The old vector still
-retrieves — slightly out of date — whereas nulling it silently removes the
-channel that catches phrasings nobody listed. So staleness is made visible
-instead: `db/04_admin.sql` adds `embedding_source_hash`, which stores the md5 of
-the exact document that was embedded. If the live text no longer hashes to it,
-the row is listed on the Embeddings page, and one button fixes it.
+The dashboard no longer embeds anything. The backend owns the search index:
+it builds an in-process Lucene index from the `features` table on every
+registry refresh (60 s), embeds only the rows whose text changed, and keeps
+serving the previous generation if the embedding provider is down. There is
+no vector column in Postgres to keep current and no staleness to track.
 
-The re-embed path is a faithful port of
-`embedding-service/precompute_embeddings.py`:
+What the dashboard does is read that state back (`GET /api/admin/index` on
+the backend) and offer two buttons:
 
-- the same document (`display_name. keywords. aliases. description`, empty
-  parts dropped) — `src/lib/featureDocument.ts` holds the TypeScript and SQL
-  forms side by side
-- sent with `is_query: false`, because bge is **asymmetric** — a document
-  embedded with the query prefix retrieves measurably worse and fails nothing
-  loudly
-- written with the same 6-decimal pgvector literal
+- **Rebuild index** — refresh now instead of waiting out the interval. The
+  feature form calls this after a save when "Update search index after
+  saving" is ticked. Costs one embedding call for the row that changed.
+- **Re-embed all** — `force=true`: every feature is re-embedded. For after the
+  embedding model or its dimensions change.
 
-Verified against the running stack: a feature embedded through the dashboard
-scores cosine `1.000000` against the embedding service's document form of the
-same row. Either tool can be used; they produce the same vectors.
-
-The hash written is the hash of the document that was actually embedded, not a
-fresh one computed at write time — so an edit made *during* a long backfill
-leaves the row correctly marked stale rather than falsely marked current.
+Both go through `/api/embeddings` on the dashboard, which proxies to the
+backend; the route kept its name so nothing else had to move.
 
 ---
 

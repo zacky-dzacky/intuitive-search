@@ -1,7 +1,6 @@
 import { HealthPill } from "@/components/HealthPill";
 import { LogoutButton } from "@/components/LogoutButton";
 import { type NavSection, Sidebar } from "@/components/Sidebar";
-import { staleCount } from "@/lib/embeddings";
 import { RESOURCES } from "@/lib/resources/registry";
 import { can } from "@/lib/resources/types";
 
@@ -15,8 +14,6 @@ export const dynamic = "force-dynamic";
  * written to. Adding a resource adds its nav entry.
  */
 export default async function AppLayout({ children }: { children: React.ReactNode }) {
-  const stale = await staleCount();
-
   const toItem = (resource: (typeof RESOURCES)[number]) => ({
     href: `/resources/${resource.name}`,
     label: resource.labelPlural,
@@ -29,12 +26,7 @@ export default async function AppLayout({ children }: { children: React.ReactNod
       items: [
         { href: "/", label: "Overview", icon: "◎" },
         { href: "/playground", label: "Search playground", icon: "🔎" },
-        {
-          href: "/embeddings",
-          label: "Embeddings",
-          icon: "🧬",
-          badge: stale > 0 ? String(stale) : null,
-        },
+        { href: "/embeddings", label: "Search index", icon: "🧬" },
         { href: "/analytics", label: "Analytics", icon: "📈" },
       ],
     },

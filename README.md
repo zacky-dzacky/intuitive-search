@@ -16,9 +16,10 @@ It never executes anything.
                               ▼
         ┌───────────────────────────────────────────┐
         │ Stage 1 · Hybrid search      always, fast  │
-        │  · Postgres FTS (prefix)   ─┐              │
-        │  · pg_trgm fuzzy/abbrev    ─┼─ weighted    │
-        │  · pgvector cosine (HNSW)  ─┤    merge     │
+        │  in-process Lucene index, no network hop:  │
+        │  · BM25 stemmed + prefix   ─┐              │
+        │  · trigram fuzzy/abbrev    ─┼─ weighted    │
+        │  · vector cosine (HNSW)    ─┤    merge     │
         │  · naming-term containment ─┘              │
         └──────────────────┬────────────────────────┘
                            ▼
@@ -64,35 +65,39 @@ one by accident — the response type's `action` field has exactly four values:
 # 1. Database (local Postgres — see db/DATABASE.md for setup)
 psql -U bank -d banksearch -f db/01_schema.sql
 psql -U bank -d banksearch -f db/02_seed.sql
+#    Upgrading a database from before the Lucene change? Run this once instead:
+#    psql -U bank -d banksearch -f db/05_drop_search_columns.sql
 
-# 2. Deploy backend + embedding service to Kubernetes
+# 2. Model credentials — one API key covers both stages.
+#    Gemini today; the same three values point at Azure AI Foundry later.
+cp backend/k8s/secret.example.yaml backend/k8s/secret.yaml   # fill in OPENAI_API_KEY
+
+# 3. Deploy the backend to Kubernetes. On startup it loads the registry,
+#    embeds the 67 features in one call and builds the search index in memory.
 cd backend && ./deploy-local.sh && cd ..
-cd embedding-service && ./deploy-local.sh && cd ..
-
-# 3. Backfill feature embeddings, then build the vector index
-cd embedding-service
-pip install -r requirements.txt
-python precompute_embeddings.py
-cd ..
-psql -U bank -d banksearch -f db/03_indexes.sql
 
 # 4. Demo UI — point it at the k8s service
 open "frontend/index.html?api=http://k8s.orb.local:8080"
 ```
 
-If you don't want to install Python locally, run the backfill inside the
-embedding pod instead:
+Running the backend directly instead of on k8s:
 
 ```bash
-kubectl exec -it deploy/embedding-service -- \
-  env DATABASE_URL=postgresql://bank:bank@host.docker.internal:5432/banksearch \
-  python precompute_embeddings.py
+cd backend
+OPENAI_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai \
+OPENAI_API_KEY=... LLM_PROVIDER=openai \
+JAVA_HOME=$(/usr/libexec/java_home -v 21) mvn spring-boot:run
 ```
+
+With no `OPENAI_API_KEY` at all the backend still starts: Stage 2 falls back
+to `heuristic` if you set `LLM_PROVIDER=heuristic`, and the vector channel is
+simply dropped (weights renormalised) until a key is configured.
 
 ### Verified behaviour
 
 Measured against the running stack (67 seeded features, embeddings loaded,
-`provider: heuristic`):
+`provider: heuristic`; numbers predate the Lucene index — re-measure with
+`smoke-search.sh` after deploying):
 
 | Query | Feature | Conf. | Action | LLM | Time |
 |---|---|---|---|---|---|
@@ -194,15 +199,16 @@ VALUES ('request_cheque_book', 'Request Cheque Book',
            "description":"How many cheque books to order."}]'::jsonb);
 ```
 
-Then embed it: `python embedding-service/precompute_embeddings.py`.
-The registry cache picks the row up within 60s (`search.registry-refresh-ms`).
+That's it. The registry cache picks the row up within 60s
+(`search.registry-refresh-ms`), embeds just that row, and rebuilds the index —
+or press *Rebuild index* in the admin dashboard to do it now.
 
 That row alone drives all four stages:
 
 | Column | Drives |
 |---|---|
-| `keywords`, `aliases` | full-text + trigram matching (`search_document` and `match_text` are `GENERATED` columns, so they can't drift) |
-| `embedding` | vector recall for phrasings nobody listed |
+| `display_name`, `keywords`, `aliases` | full-text + trigram matching, and the naming terms the containment channel looks for |
+| `description` (with the above) | the text that is embedded — vector recall for phrasings nobody listed |
 | `has_params` + `slots` | whether signal detection can ever open the LLM gate |
 | `slots[].description` | the text injected into the one shared prompt |
 | `slots[].type` / `enum` | the JSON schema used for constrained decoding, and type coercion |
@@ -215,26 +221,47 @@ set — `payee`, `account`, `currency`, `amount`, `date`, `period`, `phone`,
 
 ---
 
-## Stage 2 providers
+## Model providers
+
+Both models — the embedding model behind the vector channel and the LLM
+behind Stage 2 — are reached through **one OpenAI-compatible adapter**. Azure
+AI Foundry's v1 API and Gemini's compatibility endpoint speak the same wire
+format with a plain API key, so the adapter has no provider SDK and no
+provider branch; moving between them is configuration.
+
+| Env var | Gemini (now) | Azure AI Foundry (when the sandbox lands) |
+|---|---|---|
+| `OPENAI_BASE_URL` | `https://generativelanguage.googleapis.com/v1beta/openai` | `https://<resource>.openai.azure.com/openai/v1` |
+| `OPENAI_API_KEY` | Gemini key | Foundry key |
+| `OPENAI_CHAT_MODEL` | `gemini-3.6-flash` | chat *deployment* name, e.g. `gpt-4.1-mini` |
+| `OPENAI_EMBEDDING_MODEL` | `gemini-embedding-001` | embedding *deployment* name, e.g. `text-embedding-3-small` |
+| `EMBEDDING_DIMENSIONS` | `768` | `768` |
+| `OPENAI_REASONING_EFFORT` | `low` (Gemini 3.x thinks by default; extraction doesn't need it) | unset for a non-reasoning deployment, `low` for an o-series one |
+
+Nothing else changes. The rationale, and what was checked, is in
+[`docs/adr/001-frontier-models-openai-compatible-adapter.md`](docs/adr/001-frontier-models-openai-compatible-adapter.md).
+
+### Stage 2 providers
 
 Set `search.llm.provider` (env `LLM_PROVIDER`):
 
 | Value | Use for | Notes |
 |---|---|---|
+| `openai` | **the office standard** | Any OpenAI-compatible endpoint: Gemini, Azure AI Foundry, OpenAI. Slot schema sent as `response_format` JSON schema. |
 | `heuristic` *(default)* | local dev, CI | No model, no network. Regex + slot metadata. Keeps the pipeline runnable and testable offline. |
-| `ollama` | on-prem / air-gapped | `qwen2.5:3b-instruct` or `phi-3-mini`. Slot schema passed as Ollama's `format`, which constrains decoding to conforming JSON. Also fits any vLLM front-end exposing the same API. |
-| `anthropic` | hosted | Claude Haiku (`claude-haiku-4-5`). Extraction is expressed as a **tool call** whose input schema is the feature's slots, so output is structured, not prose. Credentials resolve from `ANTHROPIC_API_KEY` or an `ant auth login` profile — never hardcoded. |
+| `ollama` | on-prem / air-gapped | `qwen2.5:3b-instruct` or `phi-3-mini`. Slot schema passed as Ollama's `format`. Retained as an option; not the office direction. |
+| `anthropic` | hosted, Anthropic direct | Claude Haiku via tool call. Retained as an option. |
 
-All three go through the same prompt template, the same JSON schema, and the
+All four go through the same prompt template, the same JSON schema, and the
 same defensive parser. Swapping providers is a config change.
 
-**Nothing the model returns is trusted.** `SlotJsonParser` strips code fences,
-digs the object out of prose, repairs trailing commas and smart quotes, drops
-any key the feature doesn't declare, enforces enums, and coerces types. A
-malformed response yields an empty result and a navigation outcome — never an
-exception, and never a wrong pre-fill. Stage 3 then re-normalises every value
-deterministically, so a wrong model output becomes a blank field rather than a
-plausible-looking wrong one.
+### Embeddings
+
+Same adapter, same endpoint and key as Stage 2 unless `OPENAI_EMBEDDING_BASE_URL`
+/ `OPENAI_EMBEDDING_API_KEY` say otherwise. `dimensions` (768) is sent to the
+provider and enforced on the way back. With no key configured the vector
+channel is dropped and search runs lexical-only — that is the dev/CI mode;
+there is no self-hosted embedding model any more.
 
 ---
 
@@ -292,12 +319,13 @@ Two fixes, both in `HybridSearchService`:
   which feature this is". A clear gap to the runner-up measures that directly,
   without the length bias.
 
-**2. `ivfflat` silently lost the right answer.** At `lists = 8` with the
-default `probes = 1`, a query searches one partition — and `send 250 usd to
-landlord` came back with the transfer feature scoring **0.0** on the vector
-channel while topping every lexical one. Not an error, just a quietly missing
-candidate. `db/03_indexes.sql` uses **HNSW** instead: no training data, far
-better default recall, and irrelevant build cost at this size.
+**2. `ivfflat` silently lost the right answer.** (Historical — the vector
+channel now lives in Lucene, which is HNSW-only.) At `lists = 8` with the
+default `probes = 1`, pgvector's ivfflat searched one partition — and `send
+250 usd to landlord` came back with the transfer feature scoring **0.0** on
+the vector channel while topping every lexical one. Not an error, just a
+quietly missing candidate. Switching to HNSW fixed it; Lucene's index
+carries that choice forward.
 
 > *All slot definitions and feature metadata must live in the features
 > table/config, not in application code.*
@@ -309,9 +337,16 @@ There is no feature id in any `switch`, `if`, or prompt file. Grep for
 
 ## Load testing
 
+> The measurements in this section were taken against the previous stack
+> (Postgres channels + the on-cluster bge-small service). They are kept
+> because the *lessons* — bound the whole operation, not the read; shed
+> rather than queue — are what shaped `EmbeddingClient`, and those guards
+> now sit in front of the hosted provider unchanged. Re-run `loadtest.py`
+> against the Lucene build for current numbers.
+
 `loadtest.py` is a dependency-free async load generator (keep-alive, percentile
 reporting). `{i}` in a body is replaced per request, which matters: the
-embedding service caches by query text, so a fixed query measures the cache
+backend caches query embeddings by text, so a fixed query measures the cache
 rather than the model.
 
 ```bash
@@ -390,30 +425,12 @@ Two tail-latency fixes followed:
   95ms, not 5.4s.
 - **Sequence length is capped at 128 tokens and text at 512 chars**, matching
   the API's own limit. Feature documents top out at 60 tokens and queries are
-  shorter, so nothing real is truncated — verified by
-  `check_embeddings.py` still reporting cosine 1.00000 against the stored
-  vectors. A 2000-char request is now rejected in 2.5ms instead of occupying a
+  shorter, so nothing real is truncated. A 2000-char request is now rejected in 2.5ms instead of occupying a
   worker for half a second.
-
-Note `precompute_embeddings.py` loads its own model and is unaffected by the
-service's cap; the two stay consistent because no document reaches 128 tokens.
 
 **Still on the table** (not done here): micro-batching would roughly double
 throughput per core — batch-of-32 costs 13.0ms/query versus 26.9ms one at a
 time — and ONNX or int8 quantisation would cut the forward pass further.
-
-### Embedding correctness
-
-`embedding-service/check_embeddings.py` — 8 checks, all passing. Beyond shape
-and normalisation it verifies the part that fails *silently*: bge is asymmetric,
-so queries get the retrieval prefix and documents must not. It confirms the
-vectors `precompute_embeddings.py` stored match the live service's document
-form (cosine 1.00000) and not its query form, and that the prefix genuinely
-improves retrieval on this registry (4/5 probes vs 2/5 without).
-
-```bash
-python3 embedding-service/check_embeddings.py
-```
 
 ## Performance notes
 
@@ -422,13 +439,17 @@ The budgets are &lt;100ms for navigation and &lt;400ms for command queries.
 - **Virtual threads** (`spring.threads.virtual.enabled=true`) — the request
   path chains four blocking I/O calls; virtual threads scale that on ordinary
   blocking code instead of reactive plumbing.
-- **Stage 1 fans out.** The lexical SQL and the query-embedding round trip run
-  concurrently on a virtual-thread executor; only the pgvector query waits on
-  the embedding.
-- **The registry is cached in memory.** Retrieval SQL returns ids and scores;
+- **Stage 1 fans out.** The lexical index search and the query-embedding
+  round trip run concurrently on a virtual-thread executor; only the kNN
+  query waits on the embedding.
+- **Retrieval is in process.** The Lucene index lives in the JVM heap and is
+  rebuilt from Postgres only when the registry changes, so the embedding call
+  is the one network hop left on the hot path — and repeated queries are
+  served from an in-JVM cache without it.
+- **The registry is cached in memory.** The index returns ids and scores;
   full rows are hydrated locally, and the containment channel scans them
   directly. 67 rows costs nothing to hold or scan.
-- **Fail-soft vector search.** If the embedding service is slow, saturated, or
+- **Fail-soft vector search.** If the embedding provider is slow, saturated, or
   down, its weight is dropped and the remaining weights are *renormalised*, so
   confidence stays on the same 0–1 scale and thresholds keep meaning what they
   meant. A degraded search beats a 500. Enforced by a deadline that covers
@@ -442,16 +463,18 @@ The budgets are &lt;100ms for navigation and &lt;400ms for command queries.
 ## Layout
 
 ```
-db/                   01_schema.sql · 02_seed.sql (67 features) · 03_indexes.sql
-embedding-service/    FastAPI /embed + offline precompute_embeddings.py
+db/                   01_schema.sql · 02_seed.sql (67 features) · 05_drop_search_columns.sql (upgrade)
+docs/adr/             The two decisions behind this revision: frontier models, Lucene
 backend/
   config/             SearchProperties (every threshold and weight) · HTTP clients
-  registry/           FeatureRepository (the 3 retrieval channels) · FeatureRegistry cache
-  search/             EmbeddingClient · HybridSearchService · SearchOrchestrator
+  registry/           FeatureRepository (reads the catalogue) · FeatureRegistry cache
+  index/              FeatureIndex (Lucene: BM25 · trigram · HNSW) · FeatureIndexer (keeps it in step)
+  embedding/          EmbeddingClient (guards) · OpenAiEmbeddingBackend (wire)
+  search/             HybridSearchService · SearchOrchestrator
   signal/             SignalDetector          ← the LLM gate
-  extraction/         PromptBuilder · SlotJsonParser · {Heuristic,Ollama,Anthropic}SlotExtractor
+  extraction/         PromptBuilder · SlotJsonParser · {OpenAiCompatible,Heuristic,Ollama,Anthropic}SlotExtractor
   resolution/         PayeeResolver · AccountResolver · ScalarSlotResolvers
-  api/                SearchController · ApiExceptionHandler
+  api/                SearchController · IndexAdminController · ApiExceptionHandler
 frontend/index.html   Typeahead + pre-filled form demo
 ```
 
@@ -461,10 +484,13 @@ frontend/index.html   Typeahead + pre-filled form demo
 cd backend && JAVA_HOME=$(/usr/libexec/java_home -v 21) mvn test
 ```
 
-38 unit tests, no database or model required. They cover the signal gate, the
-defensive JSON parsing of hostile model output, tsquery sanitisation, prompt
-genericity, Stage-3 normalisation, and the containment-ranking behaviour that
-fixed the two problems above.
+75 unit tests, no database, no model, no network. They cover the signal gate,
+the defensive JSON parsing of hostile model output, prompt genericity, Stage-3
+normalisation, the containment-ranking behaviour that fixed the two problems
+above, the Lucene index (prefix, stemming, trigram thresholds, kNN scoring,
+generation swap), the indexer (embed only what changed, survive an outage),
+and the OpenAI-compatible adapter's wire contract (mocked HTTP, both
+directions, including a 3072-dim answer cut to 768).
 
 ---
 
@@ -477,8 +503,16 @@ Things this repo demonstrates but a real deployment must change:
   feature must never be able to enumerate another customer's payees.
 - **CORS is `*`** (`search.cors-origins`). Pin it.
 - **No authn/authz on the endpoints.** Put them behind the existing gateway.
-- **HNSW is sized for ~10^2 features.** Revisit the index choice (and
-  `hnsw.ef_search`) only if the registry grows by orders of magnitude.
-- **Prompt/PII.** Queries are sent to the Stage-2 provider. With
-  `provider: anthropic` that is a network egress of user-typed text — which is
-  exactly why `ollama` exists as a first-class option here.
+- **The search index is in-heap and per replica.** Right for a catalogue of
+  10^2–10^4 rows that rebuilds in milliseconds. If the corpus ever becomes
+  help articles or FAQs in the tens of thousands, move to `MMapDirectory` on
+  local disk or OpenSearch — same Lucene, same fields — not back to pgvector.
+  See `docs/adr/002-lucene-replaces-pgvector.md`.
+- **An admin rebuild refreshes one replica.** The others converge on their
+  next scheduled refresh (60 s). Fine for a catalogue; if that lag ever
+  matters, publish a "registry changed" signal instead of polling.
+- **Prompt/PII.** Queries — and feature texts — are sent to the model
+  provider. That is a network egress of user-typed text, so the provider
+  choice is a data-governance decision as much as a technical one; Azure AI
+  Foundry inside the office's tenancy is the intended home. `ollama` remains
+  for an air-gapped deployment.

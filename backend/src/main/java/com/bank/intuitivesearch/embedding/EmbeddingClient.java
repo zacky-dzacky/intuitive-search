@@ -1,9 +1,10 @@
-package com.bank.intuitivesearch.search;
+package com.bank.intuitivesearch.embedding;
 
 import com.bank.intuitivesearch.config.SearchProperties;
-import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
-import com.fasterxml.jackson.annotation.JsonProperty;
+import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
@@ -15,16 +16,19 @@ import java.util.concurrent.atomic.AtomicLong;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
-import org.springframework.web.client.RestClient;
 
 /**
- * Client for the Python embedding microservice.
+ * The embedding call, wrapped in everything that keeps it from hurting.
  *
  * <p>The embedding model is the slowest thing in the pipeline and the only
  * remote dependency on the hot path, so this class exists as much to contain
- * it as to call it. Three guards, in order:
+ * it as to call it. The transport is an {@link EmbeddingBackend} chosen by
+ * configuration; the guards below apply to every backend equally:
  *
  * <ol>
+ *   <li><b>Query cache</b> — typeahead sends "tra", "tran", "trans"… and the
+ *       same handful of full queries over and over. With a hosted model every
+ *       miss is latency <em>and</em> money, so recent queries are kept.</li>
  *   <li><b>Circuit breaker</b> — after repeated failures, stop calling
  *       entirely for a cooldown. Without this, a sick service costs every
  *       single request a full timeout.</li>
@@ -47,23 +51,31 @@ public class EmbeddingClient {
 
     private static final Logger log = LoggerFactory.getLogger(EmbeddingClient.class);
 
-    private final RestClient restClient;
+    private final EmbeddingBackend backend;
     private final SearchProperties properties;
     private final ExecutorService executor;
     private final Semaphore inFlight;
+    private final Map<String, float[]> queryCache;
 
     private final AtomicInteger consecutiveFailures = new AtomicInteger();
     private final AtomicLong circuitOpenUntilNanos = new AtomicLong();
     private volatile boolean degraded;
 
-    public EmbeddingClient(RestClient embeddingRestClient,
+    public EmbeddingClient(EmbeddingBackend backend,
                            SearchProperties properties,
                            ExecutorService searchExecutor) {
-        this.restClient = embeddingRestClient;
+        this.backend = backend;
         this.properties = properties;
         this.executor = searchExecutor;
         this.inFlight = new Semaphore(
                 Math.max(1, properties.getEmbedding().getMaxConcurrent()), true);
+        int cacheSize = Math.max(0, properties.getEmbedding().getQueryCacheSize());
+        this.queryCache = Collections.synchronizedMap(new LinkedHashMap<>(64, 0.75f, true) {
+            @Override
+            protected boolean removeEldestEntry(Map.Entry<String, float[]> eldest) {
+                return size() > cacheSize;
+            }
+        });
     }
 
     /**
@@ -73,8 +85,12 @@ public class EmbeddingClient {
      */
     public Optional<float[]> embedQuery(String text) {
         SearchProperties.Embedding config = properties.getEmbedding();
-        if (!config.isEnabled()) {
+        if (!isEnabled()) {
             return Optional.empty();
+        }
+        float[] cached = queryCache.get(text);
+        if (cached != null) {
+            return Optional.of(cached);
         }
         if (circuitOpen()) {
             return Optional.empty();
@@ -100,6 +116,9 @@ public class EmbeddingClient {
             Optional<float[]> result = pending.get(config.getTimeoutMs(), TimeUnit.MILLISECONDS);
             if (result.isPresent()) {
                 onSuccess();
+                if (config.getQueryCacheSize() > 0) {
+                    queryCache.put(text, result.get());
+                }
             }
             return result;
         } catch (TimeoutException e) {
@@ -115,24 +134,24 @@ public class EmbeddingClient {
         }
     }
 
+    /**
+     * Embeds catalogue documents for the index builder. Not on the request
+     * path, so none of the hot-path guards apply: it may take seconds, and a
+     * failure is the caller's to report — the builder keeps whatever vectors
+     * it already has and retries on the next refresh.
+     *
+     * @throws IllegalStateException when embeddings are disabled
+     */
+    public List<float[]> embedDocuments(List<String> texts) {
+        if (!isEnabled()) {
+            throw new IllegalStateException("embeddings are disabled or the provider is not configured");
+        }
+        return backend.embedDocuments(texts);
+    }
+
     private Optional<float[]> call(String text) {
         try {
-            EmbedResponse response = restClient.post()
-                    .uri("/embed")
-                    .body(new EmbedRequest(text, true))
-                    .retrieve()
-                    .body(EmbedResponse.class);
-
-            if (response == null || response.embedding() == null || response.embedding().isEmpty()) {
-                return Optional.empty();
-            }
-            int expected = properties.getEmbedding().getDimensions();
-            if (response.embedding().size() != expected) {
-                log.warn("Embedding service returned {} dims but features.embedding is VECTOR({}); "
-                        + "skipping vector search", response.embedding().size(), expected);
-                return Optional.empty();
-            }
-            return Optional.of(toFloatArray(response.embedding()));
+            return Optional.of(backend.embedQuery(text));
         } catch (Exception e) {
             onFailure(e.getMessage());
             return Optional.empty();
@@ -149,7 +168,7 @@ public class EmbeddingClient {
         circuitOpenUntilNanos.set(0);
         if (degraded) {
             degraded = false;
-            log.info("Embedding service recovered; vector search re-enabled");
+            log.info("Embedding provider recovered; vector search re-enabled");
         }
     }
 
@@ -161,7 +180,7 @@ public class EmbeddingClient {
                     System.nanoTime() + config.getCircuitOpenMs() * 1_000_000L);
             if (!degraded) {
                 degraded = true;
-                log.warn("Embedding service failing ({}); vector search disabled for {}ms, "
+                log.warn("Embedding provider failing ({}); vector search disabled for {}ms, "
                         + "falling back to lexical-only retrieval", reason, config.getCircuitOpenMs());
             }
         }
@@ -176,23 +195,12 @@ public class EmbeddingClient {
         return inFlight.availablePermits();
     }
 
-    private static float[] toFloatArray(List<Double> values) {
-        float[] out = new float[values.size()];
-        for (int i = 0; i < values.size(); i++) {
-            out[i] = values.get(i).floatValue();
-        }
-        return out;
+    /** Embeddings are on and the provider has what it needs to be called. */
+    public boolean isEnabled() {
+        return properties.getEmbedding().isEnabled() && backend.isConfigured();
     }
 
-    // Field names are pinned explicitly rather than relying on the global
-    // naming strategy — this is a wire contract with a separate service.
-    record EmbedRequest(
-            @JsonProperty("text") String text,
-            @JsonProperty("is_query") boolean isQuery) {}
-
-    @JsonIgnoreProperties(ignoreUnknown = true)
-    record EmbedResponse(
-            @JsonProperty("embedding") List<Double> embedding,
-            @JsonProperty("model") String model,
-            @JsonProperty("dimensions") Integer dimensions) {}
+    public String describeBackend() {
+        return backend.describe();
+    }
 }

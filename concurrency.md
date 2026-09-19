@@ -1,3 +1,9 @@
+> **Superseded (2026-09-19).** These notes are about the Python
+> sentence-transformers service, which was briefly kept as an offline-dev
+> option and has since been removed from the repository altogether. Embeddings
+> come from a hosted provider via the backend's OpenAI-compatible adapter,
+> with a query cache in front of it. Kept for the record.
+
 Got it — Q&A only, no implementation. To recap the answer:
 
 Concurrency: yes. The endpoints are sync def (app.py:142, app.py:161), so Starlette runs them in a threadpool and inference never blocks the event loop. TORCH_NUM_THREADS=1 + 4 worker processes is the right shape for CPU-bound work, and the Dockerfile documents the measurement behind it.

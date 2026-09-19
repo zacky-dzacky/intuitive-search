@@ -10,9 +10,9 @@ interface Service {
 }
 
 /**
- * Liveness of Postgres, the search API and the embedding service.
+ * Liveness of Postgres and the search API.
  *
- * Polled from the client rather than rendered server-side, so three network
+ * Polled from the client rather than rendered server-side, so network
  * probes never sit in front of a page render — and so a service coming back up
  * shows without a reload.
  */
