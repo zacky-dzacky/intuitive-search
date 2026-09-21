@@ -15,9 +15,10 @@ import org.springframework.web.client.RestClient;
 
 /**
  * Stage 2 against any provider that speaks the OpenAI chat-completions wire
- * format: Gemini today, Azure AI Foundry when the sandbox lands. Both accept
- * a plain API key, so moving between them is three configuration values
- * ({@code base-url}, {@code api-key}, {@code model}) and no code.
+ * format: the Azure AI Foundry sandbox (via the bank's LiteLLM proxy) today,
+ * Gemini before it. Both accept a plain API key, so moving between them is
+ * three configuration values ({@code base-url}, {@code api-key},
+ * {@code model}) and no code.
  *
  * <p>The feature's slot schema goes in {@code response_format} as a JSON
  * schema, which both providers use to constrain decoding. Should a provider

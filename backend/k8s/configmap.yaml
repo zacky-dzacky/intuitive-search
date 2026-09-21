@@ -5,24 +5,31 @@ metadata:
   namespace: default
 data:
   # ---- Models -------------------------------------------------------
-  # Both stages use the OpenAI-compatible adapter. The values below are for
-  # Gemini; the Azure AI Foundry sandbox needs only these swapped (and the
-  # key in secret.yaml). See docs/adr/001-frontier-models-openai-compatible-adapter.md
+  # Both stages use the OpenAI-compatible adapter.
+  # See docs/adr/001-frontier-models-openai-compatible-adapter.md
+  #
+  # Stage 2 (slot extraction) runs on the Azure AI Foundry sandbox, reached
+  # through the bank's LiteLLM proxy. The key (secret.yaml) is scoped to two
+  # chat models: gpt-5.4-mini and model-router.
   LLM_PROVIDER: "openai"
-  OPENAI_BASE_URL: "https://generativelanguage.googleapis.com/v1beta/openai"
-  OPENAI_CHAT_MODEL: "gemini-3.6-flash"
-  # Gemini 3.x thinks before answering; extraction doesn't need it. Remove for
-  # a non-reasoning Foundry deployment (it would reject the parameter).
+  OPENAI_BASE_URL: "https://mbb-litellm-proxy-sb-sea.southeastasia.cloudapp.azure.com/v1"
+  OPENAI_CHAT_MODEL: "gpt-5.4-mini"
+  # gpt-5.4-mini is a reasoning model; extraction needs as little as possible.
+  # Remove if OPENAI_CHAT_MODEL is switched to a non-reasoning deployment.
   OPENAI_REASONING_EFFORT: "low"
-  # Gemini free tier has a long tail (measured 1–11 s per call); a paid tier
-  # or a Foundry deployment should bring this back toward the 2500 default.
-  LLM_TIMEOUT_MS: "10000"
+  # Measured ~1.3 s per extraction call through the proxy. Keep headroom for
+  # the tail; a timeout degrades to navigate, never fails the search.
+  LLM_TIMEOUT_MS: "5000"
+
+  # The Foundry key has no embedding model behind it (the proxy returns 403
+  # for /embeddings), so the vector channel stays on Gemini for now with its
+  # own endpoint and key (OPENAI_EMBEDDING_API_KEY in secret.yaml). Once an
+  # embedding deployment is added to the Foundry key, point these at the
+  # proxy and drop the second key. Without any embedding key, set
+  # EMBEDDING_ENABLED: "false" and search runs lexical-only.
+  OPENAI_EMBEDDING_BASE_URL: "https://generativelanguage.googleapis.com/v1beta/openai"
   OPENAI_EMBEDDING_MODEL: "gemini-embedding-001"
   EMBEDDING_DIMENSIONS: "768"
-  # Azure AI Foundry — uncomment and fill in when the sandbox is provisioned:
-  # OPENAI_BASE_URL: "https://<resource>.openai.azure.com/openai/v1"
-  # OPENAI_CHAT_MODEL: "<chat deployment name>"
-  # OPENAI_EMBEDDING_MODEL: "<embedding deployment name>"
   # Overrides logging.level.com.bank.intuitivesearch in application.yml, which
   # defaults to INFO and so hides the per-query DEBUG line in SearchOrchestrator.
   LOGGING_LEVEL_COM_BANK_INTUITIVESEARCH: "DEBUG"

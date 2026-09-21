@@ -36,8 +36,12 @@ docker run --rm \
   -e DATABASE_USER=bank \
   -e DATABASE_PASSWORD=bank \
   -e LLM_PROVIDER=openai \
-  -e OPENAI_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai \
-  -e OPENAI_API_KEY=... \
+  -e OPENAI_BASE_URL=https://mbb-litellm-proxy-sb-sea.southeastasia.cloudapp.azure.com/v1 \
+  -e OPENAI_CHAT_MODEL=gpt-5.4-mini \
+  -e OPENAI_REASONING_EFFORT=low \
+  -e OPENAI_API_KEY=sk-... \
+  -e OPENAI_EMBEDDING_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai \
+  -e OPENAI_EMBEDDING_API_KEY=<gemini-key> \
   intuitive-search-service:0.0.1
 ```
 
@@ -87,18 +91,23 @@ Edit `k8s/secret.yaml` with your credentials before the first deploy:
 | `DATABASE_URL` | JDBC URL for PostgreSQL |
 | `DATABASE_USER` | Database username |
 | `DATABASE_PASSWORD` | Database password |
-| `OPENAI_API_KEY` | The model provider's key — Gemini now, Azure AI Foundry later. Serves both chat and embeddings |
+| `OPENAI_API_KEY` | Azure AI Foundry key (via the LiteLLM proxy) for Stage-2 chat. Also serves embeddings unless `OPENAI_EMBEDDING_API_KEY` is set |
+| `OPENAI_EMBEDDING_API_KEY` | Gemini key for embeddings — the Foundry key is chat-only for now |
 | `ANTHROPIC_API_KEY` | Required only when `LLM_PROVIDER=anthropic` |
 
-Edit `k8s/configmap.yaml` to switch provider or models. **Moving from Gemini to Azure AI Foundry is these values and the key — no image rebuild:**
+Edit `k8s/configmap.yaml` to switch provider or models. **Moving between providers is these values and the key — no image rebuild.** The configmap ships with Stage 2 on Foundry and embeddings on Gemini, because the Foundry sandbox key is scoped to chat models only (`gpt-5.4-mini`, `model-router`; `/embeddings` returns 403):
 
-| Key | Gemini | Azure AI Foundry |
-|-----|--------|------------------|
+| Key | Azure AI Foundry (LiteLLM proxy) | Gemini |
+|-----|----------------------------------|--------|
 | `LLM_PROVIDER` | `openai` | `openai` |
-| `OPENAI_BASE_URL` | `https://generativelanguage.googleapis.com/v1beta/openai` | `https://<resource>.openai.azure.com/openai/v1` |
-| `OPENAI_CHAT_MODEL` | `gemini-3.6-flash` | chat deployment name |
-| `OPENAI_EMBEDDING_MODEL` | `gemini-embedding-001` | embedding deployment name |
+| `OPENAI_BASE_URL` | `https://mbb-litellm-proxy-sb-sea.southeastasia.cloudapp.azure.com/v1` | `https://generativelanguage.googleapis.com/v1beta/openai` |
+| `OPENAI_CHAT_MODEL` | `gpt-5.4-mini` (or `model-router`) | `gemini-3.6-flash` |
+| `OPENAI_REASONING_EFFORT` | `low` | `low` |
+| `OPENAI_EMBEDDING_BASE_URL` | — (no embedding model on the key yet) | `https://generativelanguage.googleapis.com/v1beta/openai` |
+| `OPENAI_EMBEDDING_MODEL` | — | `gemini-embedding-001` |
 | `EMBEDDING_DIMENSIONS` | `768` | `768` |
+
+Once the Foundry key covers an embedding deployment, set `OPENAI_EMBEDDING_MODEL` to that deployment name and drop `OPENAI_EMBEDDING_BASE_URL` / `OPENAI_EMBEDDING_API_KEY` so embeddings fall back to the chat endpoint and key. Without any embedding key, set `EMBEDDING_ENABLED: "false"` — search then runs lexical-only.
 
 ### 4. Deploy
 
@@ -207,19 +216,19 @@ Ensure `pg_trgm` and `vector` extensions are enabled in that database, and that 
 | `DATABASE_PASSWORD` | `bank` | Database password |
 | `SERVER_PORT` | `8080` | HTTP port |
 | `LLM_PROVIDER` | `heuristic` | Slot extraction backend (`openai` / `heuristic` / `ollama` / `anthropic`) |
-| `OPENAI_BASE_URL` | — | OpenAI-compatible endpoint (Gemini, Azure AI Foundry, OpenAI) |
+| `OPENAI_BASE_URL` | — | OpenAI-compatible endpoint (Azure AI Foundry via LiteLLM proxy, Gemini, OpenAI) |
 | `OPENAI_API_KEY` | — | Its API key |
-| `OPENAI_CHAT_MODEL` | `gemini-3.6-flash` | Chat model / deployment for slot extraction |
+| `OPENAI_CHAT_MODEL` | `gpt-5.4-mini` | Chat model / deployment for slot extraction |
 | `OPENAI_AUTH_HEADER` | `bearer` | `bearer` or `api-key` (legacy Azure gateways) |
 | `OPENAI_REASONING_EFFORT` | — | `none`/`low`/`medium`/`high` for thinking models; omit for non-reasoning deployments |
-| `LLM_TIMEOUT_MS` | `2500` | Stage-2 read timeout; raise for a hosted tier with a long tail (Gemini free tier: 1–11 s) |
+| `LLM_TIMEOUT_MS` | `2500` | Stage-2 read timeout; raise for a hosted tier with a long tail (Foundry via proxy: ~1.3 s; Gemini free tier: 1–11 s) |
 | `ANTHROPIC_API_KEY` | — | Required when `LLM_PROVIDER=anthropic` |
 | `ANTHROPIC_MODEL` | `claude-haiku-4-5` | Claude model for slot extraction |
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama server URL |
 | `OLLAMA_MODEL` | `qwen2.5:3b-instruct` | Ollama model for slot extraction |
 | `EMBEDDING_ENABLED` | `true` | Enable vector search channel |
 | `OPENAI_EMBEDDING_MODEL` | `gemini-embedding-001` | Embedding model / deployment |
-| `OPENAI_EMBEDDING_BASE_URL` | `$OPENAI_BASE_URL` | Only if embeddings are served from a different endpoint |
+| `OPENAI_EMBEDDING_BASE_URL` | `$OPENAI_BASE_URL` | Only if embeddings are served from a different endpoint (Gemini, while the Foundry key is chat-only) |
 | `OPENAI_EMBEDDING_API_KEY` | `$OPENAI_API_KEY` | Only if that endpoint needs a different key |
 | `EMBEDDING_DIMENSIONS` | `768` | Vector size (sent to the provider and enforced; Lucene caps at 1024) |
 | `EMBEDDING_TIMEOUT_MS` | `800` | Per-query embedding deadline on the hot path |

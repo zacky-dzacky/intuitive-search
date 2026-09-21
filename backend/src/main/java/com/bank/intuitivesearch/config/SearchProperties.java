@@ -86,7 +86,8 @@ public class SearchProperties {
     /**
      * Connection details for any service that speaks the OpenAI wire format.
      *
-     * <p>Azure AI Foundry ({@code https://<resource>.openai.azure.com/openai/v1})
+     * <p>Azure AI Foundry behind the bank's LiteLLM proxy
+     * ({@code https://mbb-litellm-proxy-sb-sea.southeastasia.cloudapp.azure.com/v1})
      * and Gemini ({@code https://generativelanguage.googleapis.com/v1beta/openai})
      * both do, with a plain API key. Swapping providers is a change to these
      * three values and nothing else.
@@ -97,13 +98,13 @@ public class SearchProperties {
         private String model = "";
         /**
          * {@code bearer} sends {@code Authorization: Bearer <key>} (OpenAI,
-         * Gemini, Foundry v1). {@code api-key} sends the legacy Azure header
+         * Gemini, Foundry / LiteLLM). {@code api-key} sends the legacy Azure header
          * for gateways that still insist on it.
          */
         private String authHeader = "bearer";
         /**
-         * Chat only. For models that "think" before answering (Gemini 3.x,
-         * OpenAI o-series), how much: {@code none} | {@code low} |
+         * Chat only. For models that "think" before answering (gpt-5.x,
+         * Gemini 3.x, OpenAI o-series), how much: {@code none} | {@code low} |
          * {@code medium} | {@code high}. Slot extraction wants as little as
          * possible — measured on Gemini 3.6 Flash, {@code low} cut the call
          * from ~3.9s to ~1.6s with identical output. Left empty the field is

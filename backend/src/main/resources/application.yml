@@ -105,29 +105,30 @@ search:
     # heuristic | openai | ollama | anthropic
     # `heuristic` needs no model at all and keeps the pipeline runnable in
     # dev/CI. `openai` is the office standard: any provider speaking the
-    # OpenAI wire format with an API key — Gemini today, Azure AI Foundry
-    # when the sandbox lands. Switching between them is the three OPENAI_*
-    # values below and nothing else.
+    # OpenAI wire format with an API key — the Azure AI Foundry sandbox
+    # (behind the bank's LiteLLM proxy) today, Gemini before it. Switching
+    # between them is the three OPENAI_* values below and nothing else.
     provider: ${LLM_PROVIDER:heuristic}
-    # Read timeout for the extraction call. 2.5s suited an on-cluster model;
-    # a hosted provider's tail depends on its tier — Gemini free tier was
-    # measured at 0.9s–11s for the *same* request. Raise per environment
-    # rather than in code; a timeout still degrades to navigate, never fails.
+    # Read timeout for the extraction call. Foundry via the proxy measured
+    # ~1.3s per call; Gemini free tier was 0.9s–11s for the *same* request.
+    # Raise per environment rather than in code; a timeout still degrades to
+    # navigate, never fails.
     timeout-ms: ${LLM_TIMEOUT_MS:2500}
     max-output-tokens: 512
     openai:
-      # Gemini:        https://generativelanguage.googleapis.com/v1beta/openai
-      # Azure Foundry: https://<resource>.openai.azure.com/openai/v1
+      # Foundry (LiteLLM proxy): https://mbb-litellm-proxy-sb-sea.southeastasia.cloudapp.azure.com/v1
+      # Gemini:                  https://generativelanguage.googleapis.com/v1beta/openai
       base-url: ${OPENAI_BASE_URL:}
       api-key: ${OPENAI_API_KEY:}
-      # Gemini: a model name (gemini-3.6-flash). Foundry: the *deployment* name.
-      model: ${OPENAI_CHAT_MODEL:gemini-3.6-flash}
-      # bearer (OpenAI, Gemini, Foundry v1) | api-key (legacy Azure gateways)
+      # Foundry: gpt-5.4-mini or model-router (what the sandbox key is scoped
+      # to). Gemini: a model name (gemini-3.6-flash).
+      model: ${OPENAI_CHAT_MODEL:gpt-5.4-mini}
+      # bearer (OpenAI, Gemini, Foundry / LiteLLM) | api-key (legacy Azure gateways)
       auth-header: ${OPENAI_AUTH_HEADER:bearer}
-      # For thinking models only (Gemini 3.x, o-series): none | low | medium | high.
-      # Extraction needs none of it; `low` took Gemini 3.6 Flash from ~3.9s to
-      # ~1.6s with the same output. Leave empty for a non-reasoning deployment —
-      # the field is then not sent at all.
+      # For thinking models only (gpt-5.x, Gemini 3.x, o-series): none | low |
+      # medium | high. Extraction needs none of it; `low` took Gemini 3.6
+      # Flash from ~3.9s to ~1.6s with the same output. Leave empty for a
+      # non-reasoning deployment — the field is then not sent at all.
       reasoning-effort: ${OPENAI_REASONING_EFFORT:}
     ollama:
       base-url: ${OLLAMA_BASE_URL:http://localhost:11434}
@@ -139,14 +140,17 @@ search:
 
   # ---- Embedding provider ------------------------------------------
   # Same contract as Stage 2: any OpenAI-compatible /embeddings endpoint with
-  # an API key — Gemini now, Azure Foundry later. With no endpoint or key the
-  # vector channel is simply dropped and search runs lexical-only; that is
-  # the dev/CI mode, there is no self-hosted model.
+  # an API key. The Foundry sandbox key is chat-only (the proxy answers 403
+  # on /embeddings), so this stays on Gemini with its own endpoint and key
+  # until an embedding deployment is added to the key. With no endpoint or
+  # key the vector channel is simply dropped and search runs lexical-only;
+  # that is the dev/CI mode, there is no self-hosted model.
   embedding:
     enabled: ${EMBEDDING_ENABLED:true}
     openai:
       # Default to the chat provider's endpoint and key; override when the
-      # embedding model is served from somewhere else.
+      # embedding model is served from somewhere else (Gemini while Foundry
+      # is chat-only).
       base-url: ${OPENAI_EMBEDDING_BASE_URL:${OPENAI_BASE_URL:}}
       api-key: ${OPENAI_EMBEDDING_API_KEY:${OPENAI_API_KEY:}}
       # Gemini: gemini-embedding-001. Foundry: e.g. text-embedding-3-small deployment.

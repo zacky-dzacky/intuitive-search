@@ -56,7 +56,7 @@ public class HttpClientConfig {
                 objectMapper).build();
     }
 
-    /** OpenAI-compatible chat client for Stage 2 (Gemini now, Azure AI Foundry later). */
+    /** OpenAI-compatible chat client for Stage 2 (Azure AI Foundry via the LiteLLM proxy). */
     @Bean
     RestClient openAiChatRestClient(SearchProperties properties, ObjectMapper objectMapper) {
         return openAi(properties.getLlm().getOpenai(),
